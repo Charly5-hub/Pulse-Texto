@@ -12,24 +12,36 @@ let authToken = "";
 let customerId = "";
 let openaiMockServer = null;
 let openaiPort = 0;
+let lastOpenaiPayload = null;
 
 before(async () => {
   openaiMockServer = createServer((req, res) => {
     if (req.method === "POST" && req.url === "/v1/chat/completions") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        id: "chatcmpl_test",
-        object: "chat.completion",
-        model: "mock-gpt",
-        choices: [
-          {
-            index: 0,
-            finish_reason: "stop",
-            message: { role: "assistant", content: "Salida IA de prueba para el test E2E." },
-          },
-        ],
-        usage: { prompt_tokens: 12, completion_tokens: 11, total_tokens: 23 },
-      }));
+      let raw = "";
+      req.on("data", (chunk) => {
+        raw += String(chunk);
+      });
+      req.on("end", () => {
+        try {
+          lastOpenaiPayload = raw ? JSON.parse(raw) : null;
+        } catch (_error) {
+          lastOpenaiPayload = null;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          id: "chatcmpl_test",
+          object: "chat.completion",
+          model: "mock-gpt",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: { role: "assistant", content: "Salida IA de prueba para el test E2E." },
+            },
+          ],
+          usage: { prompt_tokens: 12, completion_tokens: 11, total_tokens: 23 },
+        }));
+      });
       return;
     }
     res.writeHead(404, { "Content-Type": "application/json" });
@@ -128,6 +140,40 @@ test("anonymous session and email OTP login", async () => {
   authToken = verified.token;
 });
 
+test("legal consent can be recorded and consulted", async () => {
+  const before = await requestJSON(
+    "GET",
+    "/api/legal/consent-status?customerId=" + encodeURIComponent(customerId) + "&version=2026-02",
+    undefined,
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(before.ok, true);
+  assert.equal(before.accepted, false);
+
+  const consent = await requestJSON(
+    "POST",
+    "/api/legal/consent",
+    {
+      accepted: true,
+      version: "2026-02",
+      source: "e2e-test",
+      customerId,
+    },
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(consent.ok, true);
+  assert.equal(consent.version, "2026-02");
+
+  const after = await requestJSON(
+    "GET",
+    "/api/legal/consent-status?customerId=" + encodeURIComponent(customerId) + "&version=2026-02",
+    undefined,
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(after.ok, true);
+  assert.equal(after.accepted, true);
+});
+
 test("AI generation consumes free quota server-side", async () => {
   const balanceBefore = await requestJSON(
     "GET",
@@ -145,6 +191,7 @@ test("AI generation consumes free quota server-side", async () => {
       input: "Este es un texto de prueba para validar el flujo de generación.",
       systemPrompt: "Eres un editor claro y conciso.",
       userPrompt: "Resume este texto de prueba.",
+      style: "technical",
       metadata: { customerId },
     },
     { Authorization: "Bearer " + authToken }
@@ -152,6 +199,13 @@ test("AI generation consumes free quota server-side", async () => {
 
   assert.ok(generated.output.includes("Salida IA de prueba"));
   assert.equal(generated.billing.source, "free");
+  assert.equal(generated.style, "technical");
+  assert.ok(lastOpenaiPayload && Array.isArray(lastOpenaiPayload.messages));
+  assert.ok(
+    String(lastOpenaiPayload.messages[0].content || "").includes("Estilo narrativo objetivo: técnico"),
+    "Expected style guidance in system prompt"
+  );
+  assert.equal(Number(lastOpenaiPayload.temperature), 0.15);
 
   const balanceAfter = await requestJSON(
     "GET",

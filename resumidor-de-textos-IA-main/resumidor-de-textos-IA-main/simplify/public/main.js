@@ -30,6 +30,26 @@
     support: "Prioriza empatía, soluciones concretas y lenguaje sin fricción.",
   };
 
+  var NARRATIVE_STYLE_LABELS = {
+    neutral: "Neutro claro",
+    executive: "Ejecutivo",
+    technical: "Técnico",
+    academic: "Académico",
+    storytelling: "Storytelling",
+    persuasive: "Persuasivo",
+    creative: "Creativo",
+  };
+
+  var NARRATIVE_STYLE_INSTRUCTIONS = {
+    neutral: "Mantén un tono neutro, claro y directo.",
+    executive: "Enfoca la salida a toma de decisiones: breve, accionable y con prioridades.",
+    technical: "Usa terminología técnica precisa, estructura clara y evita ambigüedad.",
+    academic: "Mantén rigor formal, cohesión lógica y vocabulario académico sin adornos.",
+    storytelling: "Construye una secuencia narrativa con inicio, desarrollo y cierre.",
+    persuasive: "Presenta argumentos claros, beneficios y una llamada a la acción específica.",
+    creative: "Aporta originalidad expresiva sin perder claridad ni fidelidad al texto fuente.",
+  };
+
   var REFINEMENTS = {
     shorter: "Reduce la extensión manteniendo el significado esencial.",
     clearer: "Haz el texto más claro, simple y directo.",
@@ -288,6 +308,106 @@
     ].join("\n");
   }
 
+  function toExecutiveStyle(text) {
+    var lines = splitSentences(summarize(text)).slice(0, 4);
+    if (lines.length === 0) {
+      return text;
+    }
+    return lines.map(function (line) {
+      return "• " + line.trim();
+    }).join("\n");
+  }
+
+  function toTechnicalStyle(text) {
+    var lines = splitSentences(text).slice(0, 6);
+    if (lines.length === 0) {
+      return text;
+    }
+    return [
+      "Objetivo:",
+      lines[0] || "No definido.",
+      "",
+      "Detalle técnico:",
+      lines.slice(1).map(function (line) {
+        return "• " + line.trim();
+      }).join("\n") || "• Sin detalle adicional.",
+    ].join("\n");
+  }
+
+  function toAcademicStyle(text) {
+    var summary = summarize(text);
+    var polished = toProfessionalTone(text);
+    return [
+      "Planteamiento:",
+      summary || polished,
+      "",
+      "Desarrollo:",
+      polished,
+    ].join("\n");
+  }
+
+  function toStorytellingStyle(text) {
+    var lines = splitSentences(text);
+    if (lines.length < 2) {
+      return text;
+    }
+    return [
+      "Inicio: " + lines[0],
+      "Desarrollo: " + lines.slice(1, Math.max(2, lines.length - 1)).join(" "),
+      "Cierre: " + lines[lines.length - 1],
+    ].join("\n");
+  }
+
+  function toPersuasiveStyle(text) {
+    var base = toProfessionalTone(text);
+    return [
+      base,
+      "",
+      "Llamada a la acción: Define próximo paso, responsable y fecha.",
+    ].join("\n");
+  }
+
+  function toCreativeStyle(text) {
+    var lines = splitSentences(text);
+    if (lines.length === 0) {
+      return text;
+    }
+    return lines.map(function (line, index) {
+      if (index === 0) {
+        return "Idea semilla: " + line.trim();
+      }
+      if (index === lines.length - 1) {
+        return "Cierre con impacto: " + line.trim();
+      }
+      return "Imagen " + index + ": " + line.trim();
+    }).join("\n");
+  }
+
+  function applyNarrativeStyleLocal(text, style) {
+    if (!style || style === "neutral") {
+      return text;
+    }
+    if (style === "executive") {
+      return toExecutiveStyle(text);
+    }
+    if (style === "technical") {
+      return toTechnicalStyle(text);
+    }
+    if (style === "academic") {
+      return toAcademicStyle(text);
+    }
+    if (style === "storytelling") {
+      return toStorytellingStyle(text);
+    }
+    if (style === "persuasive") {
+      return toPersuasiveStyle(text);
+    }
+    if (style === "creative") {
+      return toCreativeStyle(text);
+    }
+    return text;
+  }
+
   function runAction(actionId, input) {
     var selected = actionId || "suggest";
     if (selected === "summary") {
@@ -403,13 +523,17 @@
     };
   }
 
-  function buildInstructions(actionId, profile, refinement) {
+  function buildInstructions(actionId, profile, style, refinement) {
     var actionLabel = ACTION_LABELS[actionId] || actionId;
     var profileInstruction = PROFILE_INSTRUCTIONS[profile] || PROFILE_INSTRUCTIONS.general;
+    var styleLabel = NARRATIVE_STYLE_LABELS[style] || NARRATIVE_STYLE_LABELS.neutral;
+    var styleInstruction = NARRATIVE_STYLE_INSTRUCTIONS[style] || NARRATIVE_STYLE_INSTRUCTIONS.neutral;
     var parts = [
       "Acción solicitada: " + actionLabel + ".",
       "Perfil de uso: " + (PROFILE_LABELS[profile] || "General") + ".",
+      "Estilo narrativo: " + styleLabel + ".",
       profileInstruction,
+      styleInstruction,
       "Responde en español neutro, con alta claridad y sin relleno.",
     ];
 
@@ -420,11 +544,12 @@
     return parts.join(" ");
   }
 
-  function buildSystemPrompt(actionId, profile, refinement) {
+  function buildSystemPrompt(actionId, profile, style, refinement) {
     return [
       "Eres un editor experto en comunicación escrita.",
-      "Prioriza precisión, utilidad práctica y legibilidad.",
-      buildInstructions(actionId, profile, refinement),
+      "Prioriza precisión, utilidad práctica, coherencia de estilo y legibilidad.",
+      buildInstructions(actionId, profile, style, refinement),
+      "Antes de responder, verifica internamente ortografía, consistencia de tono y fidelidad al contenido base.",
       "No inventes datos. Si falta contexto, trabaja solo con el texto dado.",
     ].join(" ");
   }
@@ -487,6 +612,7 @@
     var panelRaw = document.getElementById("tab-raw");
     var engineMode = document.getElementById("engine-mode");
     var profileMode = document.getElementById("intent-profile");
+    var narrativeStyleMode = document.getElementById("narrative-style");
     var engineHint = document.getElementById("engine-hint");
     var statusLine = document.getElementById("status-line");
     var qualityBadges = document.getElementById("quality-badges");
@@ -524,6 +650,10 @@
 
     function getProfile() {
       return profileMode ? profileMode.value : "general";
+    }
+
+    function getStyle() {
+      return narrativeStyleMode ? narrativeStyleMode.value : "neutral";
     }
 
     function setLoadingState(isLoading) {
@@ -570,6 +700,9 @@
       renderQuality(payload.quality);
       if (statusLine) {
         var status = "Motor: " + (payload.engineLabel || "local");
+        if (payload.styleLabel) {
+          status += " · Estilo: " + payload.styleLabel;
+        }
         if (payload.billingSource) {
           status += " · Consumo: " + payload.billingSource;
         }
@@ -594,6 +727,8 @@
         actionLabel: payload.actionLabel,
         profile: payload.profile,
         profileLabel: payload.profileLabel,
+        style: payload.style,
+        styleLabel: payload.styleLabel,
         engineLabel: payload.engineLabel || "local",
         generatedAt: payload.generatedAt,
         input: payload.input,
@@ -639,7 +774,7 @@
         });
 
         var title = document.createElement("strong");
-        title.textContent = entry.actionLabel + " · " + entry.profileLabel;
+        title.textContent = entry.actionLabel + " · " + entry.profileLabel + " · " + (entry.styleLabel || NARRATIVE_STYLE_LABELS.neutral);
         var excerpt = document.createElement("small");
         excerpt.textContent = (entry.output || "").slice(0, 160) + ((entry.output || "").length > 160 ? "…" : "");
         var meta = document.createElement("small");
@@ -657,6 +792,7 @@
       safeSetJSON(prefsKey, {
         mode: getMode(),
         profile: getProfile(),
+        style: getStyle(),
       });
     }
 
@@ -667,6 +803,9 @@
       }
       if (profileMode && typeof prefs.profile === "string") {
         profileMode.value = prefs.profile;
+      }
+      if (narrativeStyleMode && typeof prefs.style === "string") {
+        narrativeStyleMode.value = prefs.style;
       }
     }
 
@@ -695,7 +834,8 @@
 
     function runLocal(request) {
       var base = runAction(request.action, request.input);
-      var output = applyRefinementLocal(base, request.refinement);
+      var refined = applyRefinementLocal(base, request.refinement);
+      var output = applyNarrativeStyleLocal(refined, request.style);
       return Promise.resolve({
         output: output,
         engine: "local-fallback",
@@ -729,7 +869,7 @@
     }
 
     function buildRequest(options) {
-      var instructions = buildInstructions(options.action, options.profile, options.refinement);
+      var instructions = buildInstructions(options.action, options.profile, options.style, options.refinement);
       var customerId = "";
       if (global.SimplifyPayGuard && typeof global.SimplifyPayGuard.getCustomerId === "function") {
         customerId = global.SimplifyPayGuard.getCustomerId();
@@ -738,10 +878,11 @@
         input: options.input,
         action: options.action,
         profile: options.profile,
+        style: options.style || "neutral",
         refinement: options.refinement || "",
         locale: "es-ES",
         instructions: instructions,
-        systemPrompt: buildSystemPrompt(options.action, options.profile, options.refinement),
+        systemPrompt: buildSystemPrompt(options.action, options.profile, options.style, options.refinement),
         userPrompt: buildUserPrompt(options.input),
         metadata: {
           source: options.source || "user",
@@ -793,10 +934,12 @@
 
       setLoadingState(true);
       var profile = getProfile();
+      var style = getStyle();
       var request = buildRequest({
         input: text,
         action: options.action,
         profile: profile,
+        style: style,
         refinement: options.refinement,
         source: options.source,
       });
@@ -821,6 +964,8 @@
           actionLabel: ACTION_LABELS[options.action] || options.action,
           profile: profile,
           profileLabel: PROFILE_LABELS[profile] || "General",
+          style: style,
+          styleLabel: NARRATIVE_STYLE_LABELS[style] || NARRATIVE_STYLE_LABELS.neutral,
           refinement: options.refinement || "",
           refinementInstruction: options.refinement ? REFINEMENTS[options.refinement] : "",
           generatedAt: new Date().toISOString(),
@@ -846,6 +991,7 @@
           guard.trackEvent("generation_completed", {
             action: payload.action,
             profile: payload.profile,
+            style: payload.style,
             mode: payload.modeSelected,
             engine: payload.engine,
             inputWords: payload.inputWordCount,
@@ -952,6 +1098,11 @@
     }
     if (profileMode) {
       profileMode.addEventListener("change", function () {
+        savePrefs();
+      });
+    }
+    if (narrativeStyleMode) {
+      narrativeStyleMode.addEventListener("change", function () {
         savePrefs();
       });
     }

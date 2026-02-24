@@ -36,6 +36,20 @@ textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .chip-btn[aria-pressed="true"]{background:#eef2ff;border-color:#93c5fd;color:#1d4ed8;box-shadow:0 4px 10px rgba(37,99,235,.18)}
 
 .pay-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.legal-consent-row{
+  margin-top:10px;
+  display:flex;
+  align-items:flex-start;
+  gap:8px;
+  font-size:13px;
+  color:var(--muted);
+}
+.legal-consent-row input{
+  margin-top:2px;
+}
+.legal-consent-row a{
+  color:var(--pulse-700);
+}
 
 .tabs{display:flex;gap:8px;margin-bottom:8px}
 .tab{border:1px solid var(--border);background:#fff;border-radius:999px;padding:.35rem .8rem;cursor:pointer}

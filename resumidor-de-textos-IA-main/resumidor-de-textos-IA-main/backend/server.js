@@ -47,6 +47,8 @@ const CONFIG = {
   smtpUser: String(process.env.SMTP_USER || "").trim(),
   smtpPass: String(process.env.SMTP_PASS || "").trim(),
   smtpFrom: String(process.env.SMTP_FROM || "noreply@simplify.local").trim(),
+  legalVersion: String(process.env.LEGAL_VERSION || "2026-02").trim(),
+  legalRequireCheckoutConsent: String(process.env.LEGAL_REQUIRE_CHECKOUT_CONSENT || "1").trim() !== "0",
 };
 
 const dbRuntime = createDatabaseRuntime();
@@ -142,6 +144,14 @@ const RATE_LIMITERS = {
       return getClientKey(req) + ":" + normalizeCustomerId(req.body && req.body.customerId);
     },
   }),
+  checkoutStatus: createRateLimiter({
+    name: "checkout-status",
+    windowMs: 60 * 1000,
+    max: 90,
+    keyFn: function key(req) {
+      return getClientKey(req) + ":" + normalizeCustomerId(req.query && req.query.customerId);
+    },
+  }),
   eventsTrack: createRateLimiter({
     name: "events-track",
     windowMs: 60 * 1000,
@@ -175,6 +185,22 @@ const RATE_LIMITERS = {
     max: 30,
     keyFn: function key(req) {
       return getClientKey(req);
+    },
+  }),
+  legalRead: createRateLimiter({
+    name: "legal-read",
+    windowMs: 60 * 1000,
+    max: 120,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  legalWrite: createRateLimiter({
+    name: "legal-write",
+    windowMs: 60 * 1000,
+    max: 40,
+    keyFn: function key(req) {
+      return getClientKey(req) + ":" + normalizeCustomerId(req.body && req.body.customerId);
     },
   }),
 };
@@ -262,6 +288,10 @@ app.get("/api/health", async function healthHandler(_req, res) {
       auth: {
         googleConfigured: Boolean(CONFIG.googleClientId),
         emailConfigured: Boolean(mailer),
+      },
+      legal: {
+        version: CONFIG.legalVersion,
+        checkoutConsentRequired: CONFIG.legalRequireCheckoutConsent,
       },
       plans: publicPlans(),
       now: new Date().toISOString(),
@@ -470,10 +500,89 @@ app.post("/api/auth/logout", function logout(_req, res) {
   res.json({ ok: true });
 });
 
+app.post("/api/legal/consent", RATE_LIMITERS.legalWrite, async function recordLegalConsentHandler(req, res) {
+  const accepted = Boolean(req.body && req.body.accepted);
+  const requestedVersion = normalizeLegalVersion(req.body && req.body.version) || CONFIG.legalVersion;
+  const source = normalizeLegalSource(req.body && req.body.source) || "web";
+  if (!accepted) {
+    res.status(400).json({ error: "accepted=true es obligatorio para registrar consentimiento." });
+    return;
+  }
+  if (!requestedVersion) {
+    res.status(400).json({ error: "version legal inválida." });
+    return;
+  }
+
+  try {
+    const actor = await withTransaction(async function tx(client) {
+      const user = await resolveUserFromRequest(client, req, req.body && req.body.customerId, {
+        createIfMissing: true,
+        allowGeneratedCustomer: false,
+      });
+      if (!user) {
+        throw createError("customerId o sesión autenticada requerida.", 400);
+      }
+      await upsertLegalConsent(client, user, requestedVersion, source, req);
+      await recordEvent(client, "legal_consent_recorded", user.id, user.customer_id, {
+        version: requestedVersion,
+        source: source,
+      });
+      return user;
+    });
+
+    res.json({
+      ok: true,
+      customerId: actor.customer_id,
+      version: requestedVersion,
+    });
+  } catch (error) {
+    const status = Number(error && error.statusCode) || 500;
+    res.status(status).json({ error: String(error && error.message || "No se pudo registrar consentimiento legal.") });
+  }
+});
+
+app.get("/api/legal/consent-status", RATE_LIMITERS.legalRead, async function legalConsentStatusHandler(req, res) {
+  const requestedVersion = normalizeLegalVersion(req.query && req.query.version) || CONFIG.legalVersion;
+  if (!requestedVersion) {
+    res.status(400).json({ error: "version legal inválida." });
+    return;
+  }
+
+  try {
+    const result = await withTransaction(async function tx(client) {
+      const user = await resolveUserFromRequest(client, req, req.query && req.query.customerId, {
+        createIfMissing: false,
+        allowGeneratedCustomer: false,
+      });
+      if (!user) {
+        throw createError("customerId o sesión autenticada requerida.", 400);
+      }
+      const accepted = await hasLegalConsent(client, user.id, requestedVersion);
+      return {
+        user: user,
+        accepted: accepted,
+      };
+    });
+    res.json({
+      ok: true,
+      customerId: result.user.customer_id,
+      version: requestedVersion,
+      accepted: result.accepted,
+    });
+  } catch (error) {
+    const status = Number(error && error.statusCode) || 500;
+    res.status(status).json({ error: String(error && error.message || "No se pudo consultar consentimiento legal.") });
+  }
+});
+
 app.get("/api/pay/plans", function getPlans(_req, res) {
   res.json({
     stripeConfigured: Boolean(stripe),
     currency: CONFIG.priceCurrency,
+    legal: {
+      version: CONFIG.legalVersion,
+      checkoutConsentRequired: CONFIG.legalRequireCheckoutConsent,
+    },
     plans: publicPlans(),
   });
 });
@@ -492,7 +601,7 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
   }
 
   try {
-    const actor = await withTransaction(async function tx(client) {
+    const checkoutContext = await withTransaction(async function tx(client) {
       var resolved = await resolveUserFromRequest(client, req, req.body && req.body.customerId, {
         createIfMissing: true,
         allowGeneratedCustomer: false,
@@ -500,14 +609,30 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
       if (!resolved) {
         throw createError("customerId es obligatorio para iniciar checkout.", 400);
       }
-      return resolved;
+      var legalVersion = normalizeLegalVersion(req.body && req.body.legalVersion) || CONFIG.legalVersion;
+      if (CONFIG.legalRequireCheckoutConsent) {
+        if (Boolean(req.body && req.body.acceptLegal)) {
+          await upsertLegalConsent(client, resolved, legalVersion, "checkout-inline", req);
+        }
+        var consented = await hasLegalConsent(client, resolved.id, legalVersion);
+        if (!consented) {
+          throw createError("Debes aceptar Términos y Privacidad para completar el pago.", 400);
+        }
+      }
+      return {
+        actor: resolved,
+        legalVersion: legalVersion,
+      };
     });
+    const actor = checkoutContext.actor;
+    const legalVersion = checkoutContext.legalVersion;
 
     const metadata = {
       user_id: actor.id,
       customer_id: actor.customer_id,
       plan: plan.id,
       credits_granted: String(plan.credits),
+      legal_version: legalVersion,
     };
 
     const params = {
@@ -532,7 +657,11 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
         "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'created',NULL,$5,$6,false,NULL,NULL,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, updated_at = NOW()",
         [session.id, actor.id, actor.customer_id, plan.id, CONFIG.priceCurrency, plan.credits]
       );
-      await recordEvent(client, "checkout_started", actor.id, actor.customer_id, { plan: plan.id, sessionId: session.id });
+      await recordEvent(client, "checkout_started", actor.id, actor.customer_id, {
+        plan: plan.id,
+        sessionId: session.id,
+        legalVersion: legalVersion,
+      });
     });
 
     res.json({
@@ -541,9 +670,100 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
       checkoutUrl: session.url,
       plan: plan.id,
       customerId: actor.customer_id,
+      legalVersion: legalVersion,
     });
   } catch (error) {
-    res.status(500).json({ error: "No se pudo crear Checkout Session.", detail: String(error && error.message || error) });
+    const status = Number(error && error.statusCode) || 500;
+    res.status(status).json({ error: "No se pudo crear Checkout Session.", detail: String(error && error.message || error) });
+  }
+});
+
+app.get("/api/pay/checkout-status", RATE_LIMITERS.checkoutStatus, async function checkoutStatusHandler(req, res) {
+  const requestedSessionId = String(req.query && req.query.sessionId || "").trim();
+  if (!requestedSessionId) {
+    res.status(400).json({ error: "sessionId es obligatorio." });
+    return;
+  }
+
+  try {
+    const initial = await withTransaction(async function tx(client) {
+      const actor = await resolveUserFromRequest(client, req, req.query && req.query.customerId, {
+        createIfMissing: false,
+        allowGeneratedCustomer: false,
+      });
+      if (!actor) {
+        throw createError("customerId o sesión autenticada requerida.", 400);
+      }
+      const statusResult = await client.query(
+        "SELECT session_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, updated_at FROM payment_sessions WHERE session_id = $1 LIMIT 1",
+        [requestedSessionId]
+      );
+      if (statusResult.rowCount === 0) {
+        throw createError("No existe la sesión de checkout indicada.", 404);
+      }
+      const row = statusResult.rows[0];
+      const isAdmin = Boolean(req.authUser && req.authUser.role === "admin");
+      if (!isAdmin && row.customer_id !== actor.customer_id) {
+        throw createError("No autorizado para consultar esta sesión.", 403);
+      }
+      return {
+        actor: actor,
+        statusRow: row,
+      };
+    });
+
+    var reconciled = false;
+    if (stripe && initial.statusRow.status !== "completed") {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(requestedSessionId);
+        if (session && (session.payment_status === "paid" || session.status === "complete")) {
+          await withTransaction(async function tx(client) {
+            await processCheckoutCompleted(client, session);
+          });
+          reconciled = true;
+        }
+      } catch (error) {
+        logError("checkout.status.reconcile.error", {
+          requestId: req && req.requestId ? req.requestId : null,
+          sessionId: requestedSessionId,
+          message: String(error && error.message || error),
+        });
+      }
+    }
+
+    const finalResult = await withTransaction(async function tx(client) {
+      const statusResult = await client.query(
+        "SELECT session_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, updated_at FROM payment_sessions WHERE session_id = $1 LIMIT 1",
+        [requestedSessionId]
+      );
+      if (statusResult.rowCount === 0) {
+        throw createError("No existe la sesión de checkout indicada.", 404);
+      }
+      const row = statusResult.rows[0];
+      const user = await getUserByCustomerId(client, row.customer_id);
+      return {
+        statusRow: row,
+        user: user,
+      };
+    });
+
+    res.json({
+      ok: true,
+      sessionId: finalResult.statusRow.session_id,
+      customerId: finalResult.statusRow.customer_id,
+      planId: finalResult.statusRow.plan_id,
+      status: finalResult.statusRow.status,
+      granted: Boolean(finalResult.statusRow.granted),
+      creditsGranted: Number(finalResult.statusRow.credits_granted || 0),
+      amountTotal: finalResult.statusRow.amount_total || null,
+      currency: finalResult.statusRow.currency || CONFIG.priceCurrency,
+      reconciled: reconciled,
+      updatedAt: finalResult.statusRow.updated_at || new Date().toISOString(),
+      balance: finalResult.user ? buildBalancePayload(finalResult.user) : null,
+    });
+  } catch (error) {
+    const status = Number(error && error.statusCode) || 500;
+    res.status(status).json({ error: String(error && error.message || "No se pudo consultar checkout status.") });
   }
 });
 
@@ -648,12 +868,20 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
   const input = String(req.body && req.body.input || "").trim();
   const promptBase = String(req.body && req.body.systemPrompt || "Eres un editor experto en textos en español.").trim();
   const instructions = String(req.body && req.body.instructions || "").trim();
-  const systemPrompt = instructions ? (promptBase + " " + instructions) : promptBase;
+  const narrativeStyle = normalizeNarrativeStyle(req.body && req.body.style);
+  const stylePrompt = buildNarrativeStylePrompt(narrativeStyle);
+  const systemPrompt = [
+    promptBase,
+    instructions,
+    stylePrompt,
+    "Antes de responder, valida internamente ortografía, coherencia y fidelidad al texto original.",
+  ].filter(Boolean).join(" ");
   const userPrompt = String(req.body && req.body.userPrompt || input).trim();
   const requestedModel = String(req.body && req.body.model || CONFIG.openaiModel).trim() || CONFIG.openaiModel;
-  const temperature = Number.isFinite(Number(req.body && req.body.temperature))
-    ? Number(req.body.temperature)
-    : 0.2;
+  const requestedTemperature = Number(req.body && req.body.temperature);
+  const temperature = Number.isFinite(requestedTemperature)
+    ? clampNumber(requestedTemperature, 0, 1)
+    : defaultTemperatureForStyle(narrativeStyle);
 
   if (!input) {
     res.status(400).json({ error: "input es obligatorio." });
@@ -684,6 +912,7 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
       const billing = await consumeGenerationQuota(client, user.id);
       await recordEvent(client, "generation_billed", user.id, user.customer_id, {
         source: billing.source,
+        style: narrativeStyle,
       });
       const refreshed = await getUserById(client, user.id);
       billed = { source: billing.source, userId: user.id };
@@ -734,6 +963,7 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
       billing: {
         source: billed && billed.source ? billed.source : "unknown",
       },
+      style: narrativeStyle,
       balance: buildBalancePayload(actor),
     });
   } catch (error) {
@@ -767,6 +997,9 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
       const revenueStats = await client.query(
         "SELECT COALESCE(SUM(amount_total),0)::bigint AS revenue_cents, COUNT(*)::int AS completed_payments FROM payment_sessions WHERE status = 'completed'"
       );
+      const legalStats = await client.query(
+        "SELECT version, COUNT(DISTINCT user_id)::int AS accepted_users FROM legal_consents GROUP BY version ORDER BY version DESC"
+      );
       const eventsStats = await client.query(
         "SELECT event_name, COUNT(*)::int AS total FROM app_events WHERE created_at >= $1 GROUP BY event_name ORDER BY total DESC",
         [since.toISOString()]
@@ -788,6 +1021,7 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         users: userStats.rows[0],
         credits: creditsStats.rows[0],
         revenue: revenueStats.rows[0],
+        legalConsents: legalStats.rows,
         events: eventsStats.rows,
         topActions: actionStats.rows,
         dailyEvents: dailyEvents.rows,
@@ -814,6 +1048,11 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         authenticatedUsers: Number(summary.users.authenticated_users || 0),
         payingUsers: Number(summary.credits.paying_users || 0),
         activeSubscriptions: Number(summary.credits.active_subscriptions || 0),
+        legalAcceptedUsersCurrentVersion: Number(
+          (summary.legalConsents.find(function findLegal(row) {
+            return row.version === CONFIG.legalVersion;
+          }) || {}).accepted_users || 0
+        ),
         completedPayments: Number(summary.revenue.completed_payments || 0),
         totalCreditsRemaining: Number(summary.credits.total_credits_remaining || 0),
         revenueCents: Number(summary.revenue.revenue_cents || 0),
@@ -827,6 +1066,7 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         copyRatePct: generationCompleted > 0 ? Number(((copied / generationCompleted) * 100).toFixed(2)) : 0,
       },
       events: summary.events,
+      legalConsents: summary.legalConsents,
       topActions: summary.topActions,
       dailyEvents: summary.dailyEvents,
       dailyRevenue: summary.dailyRevenue,
@@ -1195,6 +1435,9 @@ async function runMigrations() {
     "CREATE TABLE IF NOT EXISTS app_events (id BIGSERIAL PRIMARY KEY, event_name TEXT NOT NULL, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, customer_id TEXT, payload JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE INDEX IF NOT EXISTS idx_app_events_created_at ON app_events(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_app_events_event_name ON app_events(event_name)",
+    "CREATE TABLE IF NOT EXISTS legal_consents (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE, customer_id TEXT NOT NULL, version TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'web', accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), user_agent TEXT, ip_hash TEXT)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_consents_user_version ON legal_consents(user_id, version)",
+    "CREATE INDEX IF NOT EXISTS idx_legal_consents_customer_version ON legal_consents(customer_id, version)",
   ];
 
   for (let i = 0; i < ddl.length; i += 1) {
@@ -1347,6 +1590,28 @@ async function mergeUsers(client, sourceUserId, targetUserId) {
   await client.query("UPDATE processed_invoices SET user_id = $1 WHERE user_id = $2", [targetUserId, sourceUserId]);
   await client.query("DELETE FROM user_credits WHERE user_id = $1", [sourceUserId]);
   await client.query("DELETE FROM app_users WHERE id = $1", [sourceUserId]);
+}
+
+async function hasLegalConsent(client, userId, version) {
+  const result = await client.query(
+    "SELECT id FROM legal_consents WHERE user_id = $1 AND version = $2 LIMIT 1",
+    [userId, version]
+  );
+  return result.rowCount > 0;
+}
+
+async function upsertLegalConsent(client, user, version, source, req) {
+  const normalizedVersion = normalizeLegalVersion(version) || CONFIG.legalVersion;
+  const normalizedSource = normalizeLegalSource(source) || "web";
+  const userAgent = String(req && req.headers && req.headers["user-agent"] || "")
+    .trim()
+    .slice(0, 240);
+  const ipHash = hashForStorage(String(req && req.ip || req && req.socket && req.socket.remoteAddress || ""));
+
+  await client.query(
+    "INSERT INTO legal_consents (user_id, customer_id, version, source, accepted_at, user_agent, ip_hash) VALUES ($1,$2,$3,$4,NOW(),$5,$6) ON CONFLICT (user_id, version) DO UPDATE SET customer_id = EXCLUDED.customer_id, source = EXCLUDED.source, accepted_at = NOW(), user_agent = EXCLUDED.user_agent, ip_hash = EXCLUDED.ip_hash",
+    [user.id, user.customer_id, normalizedVersion, normalizedSource, userAgent || null, ipHash || null]
+  );
 }
 
 async function recordEvent(client, eventName, userId, customerId, payload) {
@@ -1686,6 +1951,89 @@ function normalizeDisplayName(value) {
     return "";
   }
   return normalized.slice(0, 120);
+}
+
+function normalizeLegalVersion(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "")
+    .slice(0, 40);
+  return normalized || "";
+}
+
+function normalizeLegalSource(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "")
+    .slice(0, 64);
+  return normalized || "";
+}
+
+function hashForStorage(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 32);
+}
+
+function normalizeNarrativeStyle(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (
+    normalized === "executive" ||
+    normalized === "technical" ||
+    normalized === "academic" ||
+    normalized === "storytelling" ||
+    normalized === "persuasive" ||
+    normalized === "creative"
+  ) {
+    return normalized;
+  }
+  return "neutral";
+}
+
+function buildNarrativeStylePrompt(style) {
+  const normalized = normalizeNarrativeStyle(style);
+  if (normalized === "executive") {
+    return "Estilo narrativo objetivo: ejecutivo. Responde con foco en decisiones, prioridades y acciones.";
+  }
+  if (normalized === "technical") {
+    return "Estilo narrativo objetivo: técnico. Mantén precisión terminológica y estructura clara.";
+  }
+  if (normalized === "academic") {
+    return "Estilo narrativo objetivo: académico. Mantén rigor, cohesión argumental y tono formal.";
+  }
+  if (normalized === "storytelling") {
+    return "Estilo narrativo objetivo: storytelling. Organiza la respuesta con inicio, desarrollo y cierre.";
+  }
+  if (normalized === "persuasive") {
+    return "Estilo narrativo objetivo: persuasivo. Refuerza beneficios y cierra con llamada a la acción concreta.";
+  }
+  if (normalized === "creative") {
+    return "Estilo narrativo objetivo: creativo. Aporta originalidad sin perder claridad ni exactitud.";
+  }
+  return "Estilo narrativo objetivo: neutro claro.";
+}
+
+function defaultTemperatureForStyle(style) {
+  const normalized = normalizeNarrativeStyle(style);
+  if (normalized === "creative" || normalized === "storytelling") {
+    return 0.45;
+  }
+  if (normalized === "technical" || normalized === "academic") {
+    return 0.15;
+  }
+  return 0.2;
+}
+
+function clampNumber(value, minValue, maxValue) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return minValue;
+  }
+  return Math.min(maxValue, Math.max(minValue, parsed));
 }
 
 function isValidEmail(value) {

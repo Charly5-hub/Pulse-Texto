@@ -54,6 +54,18 @@
             <option value="support">Soporte/Cliente</option>
           </select>
         </label>
+        <label class="field-inline" for="narrative-style">
+          Estilo narrativo
+          <select id="narrative-style">
+            <option value="neutral" selected>Neutro claro</option>
+            <option value="executive">Ejecutivo</option>
+            <option value="technical">Técnico</option>
+            <option value="academic">Académico</option>
+            <option value="storytelling">Storytelling</option>
+            <option value="persuasive">Persuasivo</option>
+            <option value="creative">Creativo</option>
+          </select>
+        </label>
       </div>
       <p id="engine-hint" class="subtle">
         Auto usa API remota si está configurada; si no, aplica motor local.
@@ -76,7 +88,12 @@
         <a id="pay-pack" class="btn outline" rel="noopener" target="_blank">10 usos · 5 €</a>
         <a id="pay-sub"  class="btn ghost"   rel="noopener" target="_blank">Suscripción · 8 €/mes</a>
       </div>
+      <label class="legal-consent-row" for="legal-consent">
+        <input id="legal-consent" type="checkbox">
+        <span>Acepto <a href="./legal/terms.html" target="_blank" rel="noopener">Términos</a>, <a href="./legal/privacy.html" target="_blank" rel="noopener">Privacidad</a> y <a href="./legal/cookies.html" target="_blank" rel="noopener">Cookies</a> para finalizar pagos.</span>
+      </label>
       <small>Stripe gestiona el pago. No guardamos datos de tarjetas.</small>
+      <small id="legal-status" class="subtle" aria-live="polite"></small>
     </section>
 
     <section id="auth-panel" class="card" aria-labelledby="auth-title">

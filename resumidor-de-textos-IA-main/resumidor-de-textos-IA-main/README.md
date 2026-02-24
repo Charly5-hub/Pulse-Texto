@@ -6,16 +6,20 @@ Aplicación de transformación de texto con enfoque productivo (2026): UX rápid
 
 - Frontend vanilla (HTML/CSS/JS) con:
   - acciones de transformación,
+  - selector de estilo narrativo (neutro, ejecutivo, técnico, académico, storytelling, persuasivo, creativo),
   - refinado 1 clic,
   - historial local,
   - control de modos IA (auto/remoto/local),
   - login por email OTP + Google,
+  - checkout con consentimiento legal y conciliación de pago por `session_id`,
   - panel admin de métricas/reconciliación.
 - Backend Node.js + Postgres con:
   - generación IA server-side (`/api/ai/generate`) con control de cuota segura,
+  - prompt hardening por estilo narrativo + control de temperatura por estilo,
   - Stripe Checkout + webhook idempotente,
   - ledger de créditos en PostgreSQL,
   - auth JWT (anónimo, email OTP, Google),
+  - consentimiento legal versionado (`/api/legal/*`),
   - eventos de producto y métricas admin.
 
 ## Estructura
@@ -34,6 +38,9 @@ Aplicación de transformación de texto con enfoque productivo (2026): UX rápid
 │   ├── .env.example
 │   ├── tests/
 │   └── sql/
+├── docs/
+│   ├── PRODUCTION_GO_LIVE_CHECKLIST.md
+│   └── nginx-security.conf
 └── simplify/
     └── public/
         ├── index.html
@@ -122,6 +129,7 @@ Opcionales importantes:
 - `GOOGLE_CLIENT_ID`
 - SMTP (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`)
 - precios y créditos (`PRICE_*`, `CREDIT_*`, `FREE_USES`)
+- legal/compliance (`LEGAL_VERSION`, `LEGAL_REQUIRE_CHECKOUT_CONSENT`)
 
 ## Endpoints principales
 
@@ -136,9 +144,14 @@ Opcionales importantes:
 ### Monetización
 - `GET /api/pay/plans`
 - `POST /api/pay/checkout`
+- `GET /api/pay/checkout-status`
 - `GET /api/pay/balance`
 - `POST /api/pay/consume`
 - `POST /api/pay/webhook` (Stripe)
+
+### Legal/Compliance
+- `POST /api/legal/consent`
+- `GET /api/legal/consent-status`
 
 ### IA y eventos
 - `POST /api/ai/generate`
@@ -214,7 +227,14 @@ psql "$DATABASE_URL" -f backend/sql/dashboard_queries.sql
 - Claves de IA y Stripe se mantienen en backend.
 - Webhook Stripe es idempotente por `event_id` en DB.
 - El consumo de cuota para IA se valida server-side (free uses + créditos).
+- Checkout exige consentimiento legal versionado antes de cobro.
+- Retorno de pago usa conciliación por `session_id` para reducir fricción por latencia webhook.
 - Admin protegido por `x-admin-key` o rol `admin` en JWT.
 - Rate limiting anti-abuso por IP/usuario en auth, IA, eventos, checkout y admin.
 - Headers de seguridad en backend (nosniff, frame deny, referrer, permissions, COOP/CORP, HSTS bajo HTTPS).
 - Trazabilidad por request con `x-request-id` y logs estructurados JSON.
+
+## Go-live recomendado (2026)
+
+- Configuración de headers/CSP en reverse proxy: `docs/nginx-security.conf`
+- Checklist de despliegue por fases (staging -> canary -> prod): `docs/PRODUCTION_GO_LIVE_CHECKLIST.md`

@@ -53,6 +53,7 @@
       customerId: "simplify.customerId.v1",
       authToken: "simplify.authToken.v1",
       authUser: "simplify.authUser.v1",
+      legalConsentVersion: "simplify.legalConsentVersion.v1",
     },
     backend: {
       endpoint: "http://localhost:8787/api/ai/generate",
@@ -67,6 +68,7 @@
       eventsPath: "/api/events/track",
       plansPath: "/api/pay/plans",
       checkoutPath: "/api/pay/checkout",
+      checkoutStatusPath: "/api/pay/checkout-status",
       balancePath: "/api/pay/balance",
       consumePath: "/api/pay/consume",
       adminMetricsPath: "/api/admin/metrics",
@@ -85,6 +87,12 @@
       googlePath: "/api/auth/google",
       googleClientId: "",
     },
+    legal: {
+      currentVersion: "2026-02",
+      consentPath: "/api/legal/consent",
+      consentStatusPath: "/api/legal/consent-status",
+      requireForCheckout: true,
+    },
   };
 
   var incoming = global.SIMPLIFY_PAY_CONFIG || {};
@@ -94,6 +102,7 @@
   merged.backend = Object.assign({}, defaults.backend, incoming.backend || {});
   merged.monetization = Object.assign({}, defaults.monetization, incoming.monetization || {});
   merged.auth = Object.assign({}, defaults.auth, incoming.auth || {});
+  merged.legal = Object.assign({}, defaults.legal, incoming.legal || {});
 
   global.SIMPLIFY_PAY_CONFIG = Object.freeze(merged);
 })(window);

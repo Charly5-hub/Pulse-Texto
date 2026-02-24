@@ -96,6 +96,7 @@
       input: request.input,
       action: request.action,
       profile: request.profile,
+      style: request.style || "neutral",
       refinement: request.refinement || null,
       locale: request.locale || "es-ES",
       model: backend.model || request.model || "",

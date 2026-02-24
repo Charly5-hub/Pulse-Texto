@@ -78,6 +78,22 @@
     }
   }
 
+  function safeGet(key) {
+    try {
+      return global.localStorage.getItem(key);
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function safeSet(key, value) {
+    try {
+      global.localStorage.setItem(key, value);
+    } catch (_error) {
+      // Ignore storage write failures.
+    }
+  }
+
   function fetchJSON(url, options) {
     var requestOptions = Object.assign({}, options || {});
     requestOptions.headers = Object.assign({}, requestOptions.headers || {});
@@ -114,19 +130,57 @@
     return status.toLowerCase();
   }
 
+  function parseCheckoutSessionIdFromURL() {
+    var params = new URLSearchParams(global.location.search);
+    return toNonEmptyString(params.get("session_id"));
+  }
+
   function setupRemoteBilling(guard, config) {
     if (!guard || !guard.canUseRemoteBilling()) {
       return;
     }
 
     var monetization = config.monetization || {};
+    var storage = config.storage || {};
+    var legal = config.legal || {};
     var apiBase = guard.getApiBase();
     var checkoutPath = toNonEmptyString(monetization.checkoutPath || "/api/pay/checkout");
     var plansPath = toNonEmptyString(monetization.plansPath || "/api/pay/plans");
+    var checkoutStatusPath = toNonEmptyString(monetization.checkoutStatusPath || "/api/pay/checkout-status");
+    var legalConsentPath = toNonEmptyString(legal.consentPath || "/api/legal/consent");
+    var legalConsentStatusPath = toNonEmptyString(legal.consentStatusPath || "/api/legal/consent-status");
+    var legalVersion = toNonEmptyString(legal.currentVersion || "2026-02");
+    var legalRequireForCheckout = legal.requireForCheckout !== false;
+    var legalConsentVersionKey = toNonEmptyString(storage.legalConsentVersion || "simplify.legalConsentVersion.v1");
 
     var oneButton = document.getElementById("pay-one");
     var packButton = document.getElementById("pay-pack");
     var subButton = document.getElementById("pay-sub");
+    var legalCheckbox = document.getElementById("legal-consent");
+    var legalStatusNode = document.getElementById("legal-status");
+
+    function setLegalStatus(message) {
+      if (!legalStatusNode) {
+        return;
+      }
+      legalStatusNode.textContent = message || "";
+    }
+
+    function hasLocalLegalConsent() {
+      return safeGet(legalConsentVersionKey) === legalVersion;
+    }
+
+    function markLocalLegalConsent(version) {
+      var targetVersion = toNonEmptyString(version || legalVersion);
+      if (!targetVersion) {
+        return;
+      }
+      safeSet(legalConsentVersionKey, targetVersion);
+    }
+
+    function getLegalPayloadSource() {
+      return "pay-ui-checkout";
+    }
 
     function track(eventName, payload) {
       guard.trackEvent(eventName, payload || {});
@@ -159,19 +213,123 @@
       return (amount / 100).toLocaleString("es-ES", { style: "currency", currency: currency });
     }
 
-    function beginCheckout(planId, button) {
-      var checkoutURL = apiBase + (checkoutPath.charAt(0) === "/" ? checkoutPath : "/" + checkoutPath);
-      setButtonBusy(button, true);
-      setStatus("Preparando checkout seguro…");
-      track("checkout_started", { plan: planId });
+    function syncLegalConsentStatus() {
+      if (!legalRequireForCheckout || !legalConsentStatusPath) {
+        return Promise.resolve({ ok: true, accepted: false });
+      }
+      var statusURL = apiBase + (legalConsentStatusPath.charAt(0) === "/" ? legalConsentStatusPath : "/" + legalConsentStatusPath)
+        + "?customerId=" + encodeURIComponent(guard.getCustomerId())
+        + "&version=" + encodeURIComponent(legalVersion);
 
-      fetchJSON(checkoutURL, {
+      return fetchJSON(statusURL, { method: "GET" }).then(function (payload) {
+        var accepted = Boolean(payload && payload.accepted);
+        if (accepted) {
+          markLocalLegalConsent(payload && payload.version ? payload.version : legalVersion);
+          if (legalCheckbox) {
+            legalCheckbox.checked = true;
+          }
+          setLegalStatus("Consentimiento legal activo (" + legalVersion + ").");
+        } else if (legalCheckbox && !legalCheckbox.checked) {
+          setLegalStatus("Para pagar, marca la aceptación de términos y privacidad.");
+        }
+        return { ok: true, accepted: accepted };
+      }).catch(function () {
+        if (hasLocalLegalConsent()) {
+          if (legalCheckbox) {
+            legalCheckbox.checked = true;
+          }
+          return { ok: true, accepted: true, local: true };
+        }
+        return { ok: false, accepted: false };
+      });
+    }
+
+    function ensureLegalConsent() {
+      if (!legalRequireForCheckout) {
+        return Promise.resolve({ ok: true, skipped: true });
+      }
+      if (!legalCheckbox) {
+        if (hasLocalLegalConsent()) {
+          return Promise.resolve({ ok: true, local: true });
+        }
+        return Promise.reject(new Error("Falta aceptación legal para continuar con el pago."));
+      }
+
+      if (!legalCheckbox.checked && !hasLocalLegalConsent()) {
+        return Promise.reject(new Error("Debes aceptar Términos y Privacidad para continuar."));
+      }
+
+      if (!legalCheckbox.checked && hasLocalLegalConsent()) {
+        return Promise.resolve({ ok: true, local: true });
+      }
+
+      if (!legalConsentPath) {
+        markLocalLegalConsent(legalVersion);
+        return Promise.resolve({ ok: true, localOnly: true });
+      }
+
+      var consentURL = apiBase + (legalConsentPath.charAt(0) === "/" ? legalConsentPath : "/" + legalConsentPath);
+      return fetchJSON(consentURL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          plan: planId,
+          accepted: true,
+          version: legalVersion,
+          source: getLegalPayloadSource(),
           customerId: guard.getCustomerId(),
         }),
+      }).then(function (payload) {
+        markLocalLegalConsent(payload && payload.version ? payload.version : legalVersion);
+        setLegalStatus("Consentimiento registrado correctamente.");
+        return { ok: true };
+      });
+    }
+
+    function reconcileCheckoutReturn(sessionId) {
+      if (!sessionId || !checkoutStatusPath) {
+        return guard.syncRemoteBalance(true).then(function () {
+          setStatus("Créditos actualizados. ¡Listo para seguir!");
+        });
+      }
+      var checkoutStatusURL = apiBase + (checkoutStatusPath.charAt(0) === "/" ? checkoutStatusPath : "/" + checkoutStatusPath)
+        + "?sessionId=" + encodeURIComponent(sessionId)
+        + "&customerId=" + encodeURIComponent(guard.getCustomerId());
+
+      return fetchJSON(checkoutStatusURL, { method: "GET" }).then(function (payload) {
+        var status = toNonEmptyString(payload && payload.status).toLowerCase();
+        if (status === "completed" || status === "reconciled") {
+          return guard.syncRemoteBalance(true).then(function () {
+            setStatus("Pago confirmado y conciliado. Créditos actualizados.");
+          });
+        }
+        return guard.syncRemoteBalance(true).then(function () {
+          setStatus("Pago recibido. Reconciliación en curso, saldo sincronizado.");
+        });
+      }).catch(function () {
+        return guard.syncRemoteBalance(true).then(function () {
+          setStatus("Pago confirmado. Créditos actualizados (modo fallback).");
+        });
+      });
+    }
+
+    function beginCheckout(planId, button) {
+      var checkoutURL = apiBase + (checkoutPath.charAt(0) === "/" ? checkoutPath : "/" + checkoutPath);
+      setButtonBusy(button, true);
+      setStatus("Validando consentimiento legal…");
+      track("checkout_started", { plan: planId });
+
+      ensureLegalConsent().then(function () {
+        setStatus("Preparando checkout seguro…");
+        return fetchJSON(checkoutURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            plan: planId,
+            customerId: guard.getCustomerId(),
+            legalVersion: legalVersion,
+            acceptLegal: Boolean(legalCheckbox && legalCheckbox.checked),
+          }),
+        });
       }).then(function (payload) {
         var redirect = toNonEmptyString(payload && payload.checkoutUrl);
         if (!redirect) {
@@ -184,6 +342,9 @@
         global.location.href = redirect;
       }).catch(function (error) {
         setStatus("No se pudo abrir el pago: " + (error && error.message ? error.message : "error inesperado"));
+        if (/t[eé]rminos|privacidad|consentimiento/i.test(String(error && error.message || ""))) {
+          track("checkout_blocked_legal", { plan: planId });
+        }
         track("checkout_failed", { plan: planId, reason: error && error.message ? error.message : "unknown" });
       }).finally(function () {
         setButtonBusy(button, false);
@@ -210,19 +371,35 @@
     wireButton(subButton, "sub");
     loadPlanLabels();
 
+    if (legalCheckbox && hasLocalLegalConsent()) {
+      legalCheckbox.checked = true;
+      setLegalStatus("Consentimiento legal recordado para esta versión.");
+    }
+    if (legalCheckbox) {
+      legalCheckbox.addEventListener("change", function () {
+        if (!legalCheckbox.checked) {
+          setLegalStatus("Recuerda aceptar los términos para completar pagos.");
+          return;
+        }
+        ensureLegalConsent().catch(function () {
+          setLegalStatus("No se pudo registrar el consentimiento ahora. Se reintentará al pagar.");
+        });
+      });
+    }
+
     guard.syncRemoteBalance(true).then(function (result) {
       if (result && result.synced) {
         setStatus("Saldo sincronizado con servidor.");
       }
     });
+    syncLegalConsentStatus();
 
     var checkoutStatus = parseCheckoutStatusFromURL();
+    var checkoutSessionId = parseCheckoutSessionIdFromURL();
     if (checkoutStatus === "success") {
       setStatus("Pago confirmado. Sincronizando créditos…");
-      track("checkout_success_return", {});
-      guard.syncRemoteBalance(true).then(function () {
-        setStatus("Créditos actualizados. ¡Listo para seguir!");
-      });
+      track("checkout_success_return", { sessionId: checkoutSessionId || "" });
+      reconcileCheckoutReturn(checkoutSessionId);
     } else if (checkoutStatus === "cancel") {
       setStatus("Pago cancelado. Puedes reintentar cuando quieras.");
       track("checkout_cancel_return", {});
@@ -249,6 +426,7 @@
     if (global.SimplifyAuth && typeof global.SimplifyAuth.onChange === "function") {
       global.SimplifyAuth.onChange(function () {
         guard.syncRemoteBalance(true);
+        syncLegalConsentStatus();
       });
     }
   }

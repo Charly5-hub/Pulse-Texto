@@ -7,6 +7,9 @@ function createMockState() {
     customerId: "cust_ui_mock_001",
     token: "mock.jwt.token",
     authenticated: false,
+    legalVersion: "2026-02",
+    legalAcceptedVersion: "",
+    checkoutReconciled: false,
     freeUses: 3,
     freeUsed: 0,
     credits: 0,
@@ -185,12 +188,54 @@ async function installApiMocks(page, options = {}) {
     }
 
     if (path === "/api/pay/checkout") {
-      const checkoutUrl = "http://127.0.0.1:4173/?checkout=success";
+      var acceptLegal = Boolean(payload.acceptLegal);
+      if (!acceptLegal && state.legalAcceptedVersion !== state.legalVersion) {
+        await fulfillJSON(route, 400, { error: "Debes aceptar Términos y Privacidad para completar el pago." });
+        return;
+      }
+      const checkoutUrl = "http://127.0.0.1:4173/?checkout=success&session_id=cs_test_ui_001";
       await fulfillJSON(route, 200, {
         ok: true,
         sessionId: "cs_test_ui_001",
         checkoutUrl,
         customerId: state.customerId,
+        legalVersion: state.legalVersion,
+      });
+      return;
+    }
+
+    if (path === "/api/pay/checkout-status") {
+      if (!state.checkoutReconciled) {
+        state.credits += 1;
+        state.checkoutReconciled = true;
+      }
+      await fulfillJSON(route, 200, {
+        ok: true,
+        sessionId: "cs_test_ui_001",
+        customerId: state.customerId,
+        status: "completed",
+        reconciled: true,
+        balance: buildBalance(state),
+      });
+      return;
+    }
+
+    if (path === "/api/legal/consent-status") {
+      await fulfillJSON(route, 200, {
+        ok: true,
+        customerId: state.customerId,
+        version: state.legalVersion,
+        accepted: state.legalAcceptedVersion === state.legalVersion,
+      });
+      return;
+    }
+
+    if (path === "/api/legal/consent") {
+      state.legalAcceptedVersion = payload.version || state.legalVersion;
+      await fulfillJSON(route, 200, {
+        ok: true,
+        customerId: state.customerId,
+        version: state.legalAcceptedVersion,
       });
       return;
     }
@@ -323,6 +368,7 @@ test("admin tools and checkout flow work with mocked APIs", async ({ page }) => 
   await page.click("#btn-admin-grant");
   await expect(page.locator("#admin-output")).toContainText("\"granted\": 10");
 
+  await page.check("#legal-consent");
   await page.click("#pay-one");
   await page.waitForURL("**/?checkout=success");
   await page.waitForTimeout(350);
