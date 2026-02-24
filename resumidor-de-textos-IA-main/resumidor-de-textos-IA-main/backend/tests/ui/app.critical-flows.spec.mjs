@@ -370,7 +370,7 @@ test("admin tools and checkout flow work with mocked APIs", async ({ page }) => 
 
   await page.check("#legal-consent");
   await page.click("#pay-one");
-  await page.waitForURL("**/?checkout=success");
+  await page.waitForURL("**/*checkout=success*");
   await page.waitForTimeout(350);
   await expect(page.locator("#pay-status")).toContainText("Créditos actualizados");
 });
