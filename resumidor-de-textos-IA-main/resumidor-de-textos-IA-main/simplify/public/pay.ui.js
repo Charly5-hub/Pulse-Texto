@@ -79,7 +79,12 @@
   }
 
   function fetchJSON(url, options) {
-    return fetch(url, options).then(function (response) {
+    var requestOptions = Object.assign({}, options || {});
+    requestOptions.headers = Object.assign({}, requestOptions.headers || {});
+    if (global.SimplifyAuth && typeof global.SimplifyAuth.authHeaders === "function") {
+      requestOptions.headers = global.SimplifyAuth.authHeaders(requestOptions.headers);
+    }
+    return fetch(url, requestOptions).then(function (response) {
       return response.text().then(function (text) {
         var json = null;
         if (text) {
@@ -172,6 +177,9 @@
         if (!redirect) {
           throw new Error("No se recibió URL de checkout.");
         }
+        if (payload && payload.customerId && typeof guard.setCustomerId === "function") {
+          guard.setCustomerId(payload.customerId);
+        }
         track("checkout_redirected", { plan: planId, sessionId: payload.sessionId || "" });
         global.location.href = redirect;
       }).catch(function (error) {
@@ -237,6 +245,12 @@
     updateUsageCounter(guard.getState());
     guard.onChange(updateUsageCounter);
     setupRemoteBilling(guard, config);
+
+    if (global.SimplifyAuth && typeof global.SimplifyAuth.onChange === "function") {
+      global.SimplifyAuth.onChange(function () {
+        guard.syncRemoteBalance(true);
+      });
+    }
   }
 
   if (global.SimplifyApp && typeof global.SimplifyApp.registerInit === "function") {

@@ -570,6 +570,9 @@
       renderQuality(payload.quality);
       if (statusLine) {
         var status = "Motor: " + (payload.engineLabel || "local");
+        if (payload.billingSource) {
+          status += " · Consumo: " + payload.billingSource;
+        }
         if (payload.fallbackReason) {
           status += " · Fallback local: " + payload.fallbackReason;
         }
@@ -713,8 +716,13 @@
       }
 
       return client.requestRemote(request, mode).catch(function (error) {
+        var reason = error && error.message ? error.message : "Error remoto";
+        var shouldBypassFallback = /cr[eé]ditos insuficientes|autenticaci[oó]n requerida|acceso admin requerido|token|401|402|403/i.test(reason);
+        if (shouldBypassFallback) {
+          throw error;
+        }
         return runLocal(request).then(function (localResult) {
-          localResult.fallbackError = error && error.message ? error.message : "Error remoto";
+          localResult.fallbackError = reason;
           return localResult;
         });
       });
@@ -767,7 +775,8 @@
         return;
       }
 
-      if (options.consumeCredit && guard && !guard.canUse()) {
+      var mode = getMode();
+      if (options.consumeCredit && guard && !guard.canUse() && mode === "local") {
         panelRes.textContent = "Te quedaste sin usos gratis. Puedes activar créditos para continuar.";
         tabs.selectTab("tab-res");
         if (typeof guard.trackEvent === "function") {
@@ -778,9 +787,11 @@
         }
         return;
       }
+      if (options.consumeCredit && guard && !guard.canUse() && mode !== "local" && typeof guard.syncRemoteBalance === "function") {
+        guard.syncRemoteBalance(true);
+      }
 
       setLoadingState(true);
-      var mode = getMode();
       var profile = getProfile();
       var request = buildRequest({
         input: text,
@@ -792,7 +803,11 @@
 
       runHybrid(request, mode).then(function (result) {
         if (options.consumeCredit && guard) {
-          guard.consumeUse();
+          if (result && result.engine === "remote") {
+            guard.syncRemoteBalance(true);
+          } else {
+            guard.consumeUse();
+          }
         }
 
         var output = (result.output || "").trim();
@@ -813,6 +828,7 @@
           engine: result.engine || "local-fallback",
           engineLabel: engineLabelFromResult(result),
           model: result.model || "",
+          billingSource: result && result.billing && result.billing.source ? result.billing.source : "",
           fallbackReason: result.fallbackError || "",
           inputWordCount: countWords(text),
           outputWordCount: countWords(output),
@@ -842,6 +858,9 @@
         panelRes.textContent = "No se pudo procesar el texto. Inténtalo de nuevo.";
         if (statusLine) {
           statusLine.textContent = "Error: " + (error && error.message ? error.message : "fallo inesperado");
+        }
+        if (guard && typeof guard.syncRemoteBalance === "function") {
+          guard.syncRemoteBalance(true);
         }
         tabs.selectTab("tab-res");
         if (guard && typeof guard.trackEvent === "function") {

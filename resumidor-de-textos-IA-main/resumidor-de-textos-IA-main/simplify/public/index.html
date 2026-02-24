@@ -78,6 +78,28 @@
       <small>Stripe gestiona el pago. No guardamos datos de tarjetas.</small>
     </section>
 
+    <section id="auth-panel" class="card" aria-labelledby="auth-title">
+      <h3 id="auth-title">Cuenta y acceso</h3>
+      <p id="auth-status" class="subtle">Sesión anónima activa. Inicia sesión para sincronizar tu saldo entre dispositivos.</p>
+      <div class="smart-controls" aria-label="Acceso por email">
+        <label class="field-inline" for="auth-email">
+          Email
+          <input id="auth-email" type="email" placeholder="tu@email.com" autocomplete="email">
+        </label>
+        <label class="field-inline" for="auth-code">
+          Código OTP
+          <input id="auth-code" type="text" inputmode="numeric" maxlength="6" placeholder="123456">
+        </label>
+      </div>
+      <div class="pay-actions">
+        <button id="btn-auth-request" class="btn outline" type="button">Enviar código</button>
+        <button id="btn-auth-verify" class="btn primary" type="button">Entrar con email</button>
+        <button id="btn-auth-logout" class="btn ghost" type="button" hidden>Cerrar sesión</button>
+      </div>
+      <div id="google-login-container" class="google-login-container"></div>
+      <small id="auth-hint">Google Login aparecerá aquí cuando configures <code>googleClientId</code>.</small>
+    </section>
+
     <section class="card" aria-labelledby="result-title">
       <h3 id="result-title">Resultado</h3>
 
@@ -108,15 +130,41 @@
       <p id="history-empty" class="subtle">Todavía no hay resultados guardados.</p>
       <ul id="history-list" class="history-list"></ul>
     </section>
+
+    <section id="admin-panel" class="card" aria-labelledby="admin-title" hidden>
+      <h3 id="admin-title">Panel admin · métricas y reconciliación</h3>
+      <div class="smart-controls" aria-label="Control admin">
+        <label class="field-inline" for="admin-api-key">
+          Admin API Key
+          <input id="admin-api-key" type="password" placeholder="x-admin-key">
+        </label>
+        <label class="field-inline" for="admin-days">
+          Ventana de análisis
+          <select id="admin-days">
+            <option value="7">7 días</option>
+            <option value="30" selected>30 días</option>
+            <option value="90">90 días</option>
+          </select>
+        </label>
+      </div>
+      <div class="pay-actions">
+        <button id="btn-admin-metrics" class="btn primary" type="button">Cargar métricas</button>
+        <button id="btn-admin-reconcile" class="btn outline" type="button">Reconciliar pagos</button>
+      </div>
+      <pre id="admin-output" class="panel"></pre>
+    </section>
   </main>
 
   <!-- Orden de scripts. Rutas relativas + cache-bust -->
   <script src="./pay.config.js?v=1758634303801" defer></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="./auth.client.js?v=1758634303801" defer></script>
   <script src="./pay.guard.js?v=1758634303801"  defer></script>
   <script src="./chips.js?v=1758634303801"      defer></script>
   <script src="./pay.ui.js?v=1758634303801"     defer></script>
   <script src="./ai.client.js?v=1758634303801"  defer></script>
   <script src="./main.js?v=1758634303801"       defer></script>
+  <script src="./admin.panel.js?v=1758634303801" defer></script>
   <script defer src="./js/sky.js"></script>
 </div><!--page-wrap-->
   <!-- removed: pulse-side old logo -->

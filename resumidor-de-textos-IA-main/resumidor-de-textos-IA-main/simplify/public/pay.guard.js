@@ -66,6 +66,13 @@
   }
 
   function getCustomerId() {
+    if (global.SimplifyAuth && typeof global.SimplifyAuth.getCustomerId === "function") {
+      var authCustomer = toNonEmptyString(global.SimplifyAuth.getCustomerId());
+      if (authCustomer) {
+        safeSet(customerKey, authCustomer);
+        return authCustomer;
+      }
+    }
     var existing = toNonEmptyString(safeGet(customerKey));
     if (existing) {
       return existing;
@@ -73,6 +80,17 @@
     var created = createCustomerId();
     safeSet(customerKey, created);
     return created;
+  }
+
+  function setCustomerId(value) {
+    var normalized = toNonEmptyString(value);
+    if (!normalized) {
+      return;
+    }
+    safeSet(customerKey, normalized);
+    if (global.SimplifyAuth && typeof global.SimplifyAuth.setCustomerId === "function") {
+      global.SimplifyAuth.setCustomerId(normalized);
+    }
   }
 
   function buildURL(pathValue) {
@@ -122,7 +140,12 @@
   }
 
   function fetchJSON(url, options) {
-    return fetch(url, options).then(function (response) {
+    var requestOptions = Object.assign({}, options || {});
+    requestOptions.headers = Object.assign({}, requestOptions.headers || {});
+    if (global.SimplifyAuth && typeof global.SimplifyAuth.authHeaders === "function") {
+      requestOptions.headers = global.SimplifyAuth.authHeaders(requestOptions.headers);
+    }
+    return fetch(url, requestOptions).then(function (response) {
       return response.text().then(function (text) {
         var json = null;
         if (text) {
@@ -159,8 +182,21 @@
       .then(function (payload) {
         var balance = payload && payload.balance ? payload.balance : payload;
         var credits = Number(balance && balance.credits);
+        var remoteFreeUses = Number(balance && balance.freeUses);
+        var remoteFreeUsed = Number(balance && balance.freeUsed);
+        var remoteCustomer = toNonEmptyString(payload && payload.customerId);
+
         if (Number.isFinite(credits)) {
           safeSet(creditsKey, Math.max(0, Math.floor(credits)));
+        }
+        if (Number.isFinite(remoteFreeUses) && remoteFreeUses >= 0) {
+          freeUses = Math.floor(remoteFreeUses);
+        }
+        if (Number.isFinite(remoteFreeUsed) && remoteFreeUsed >= 0) {
+          safeSet(usageKey, Math.max(0, Math.floor(remoteFreeUsed)));
+        }
+        if (remoteCustomer) {
+          setCustomerId(remoteCustomer);
         }
         notify();
         return { synced: true, balance: getState() };
@@ -234,6 +270,7 @@
     getState: getState,
     getApiBase: getApiBase,
     getCustomerId: getCustomerId,
+    setCustomerId: setCustomerId,
     canUseRemoteBilling: canUseRemoteBilling,
     canUse: function canUse() {
       var state = getState();

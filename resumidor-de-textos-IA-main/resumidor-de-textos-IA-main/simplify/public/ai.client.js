@@ -85,6 +85,9 @@
     if (backend.apiKey && !headers.Authorization) {
       headers.Authorization = "Bearer " + backend.apiKey;
     }
+    if (global.SimplifyAuth && typeof global.SimplifyAuth.authHeaders === "function") {
+      headers = global.SimplifyAuth.authHeaders(headers);
+    }
     return headers;
   }
 
@@ -97,6 +100,8 @@
       locale: request.locale || "es-ES",
       model: backend.model || request.model || "",
       instructions: request.instructions || "",
+      systemPrompt: request.systemPrompt || "",
+      userPrompt: request.userPrompt || request.input || "",
       metadata: request.metadata || {},
       temperature: backend.temperature,
     };
@@ -106,8 +111,10 @@
     var systemPrompt = request.systemPrompt || "Eres un asistente experto en edición de textos en español.";
     var userPrompt = request.userPrompt || request.input || "";
     return {
+      input: request.input,
       model: backend.model || request.model || "gpt-4.1-mini",
       temperature: backend.temperature,
+      metadata: request.metadata || {},
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -169,7 +176,13 @@
       throw new Error("Modo local activo.");
     }
 
-    var body = buildRequestBody(request, backend);
+    var requestWithCustomer = Object.assign({}, request || {});
+    requestWithCustomer.metadata = Object.assign({}, request.metadata || {});
+    if (!requestWithCustomer.metadata.customerId && global.SimplifyAuth && typeof global.SimplifyAuth.getCustomerId === "function") {
+      requestWithCustomer.metadata.customerId = global.SimplifyAuth.getCustomerId();
+    }
+
+    var body = buildRequestBody(requestWithCustomer, backend);
     var headers = buildHeaders(backend);
 
     return postJSON(backend.endpoint, body, headers, backend.timeoutMs).then(function (response) {
@@ -181,6 +194,8 @@
         engine: "remote",
         output: output,
         model: backend.model || request.model || "remote-model",
+        billing: response.json && response.json.billing ? response.json.billing : null,
+        balance: response.json && response.json.balance ? response.json.balance : null,
         raw: response.json || response.rawText,
       };
     });

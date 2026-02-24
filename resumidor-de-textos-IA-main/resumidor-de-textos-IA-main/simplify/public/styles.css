@@ -15,7 +15,8 @@ textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .actions{display:flex;gap:10px;margin-top:12px;justify-content:center}
 .smart-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:12px}
 .field-inline{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:13px;font-weight:600}
-.field-inline select{border:1px solid var(--border);border-radius:10px;padding:.5rem .6rem;background:#fff;color:#0f172a;font:500 14px/1.2 inherit}
+.field-inline select,.field-inline input{border:1px solid var(--border);border-radius:10px;padding:.5rem .6rem;background:#fff;color:#0f172a;font:500 14px/1.2 inherit}
+.field-inline input:focus,.field-inline select:focus{outline:3px solid var(--ring);outline-offset:1px}
 .btn{display:inline-flex;align-items:center;gap:.5rem;border-radius:999px;padding:.6rem 1rem;border:1px solid transparent;cursor:pointer;font-weight:600;font-size:14px;transition:transform .08s,box-shadow .08s,background .2s}
 .btn.primary{color:#fff;background:var(--pulse);border-color:var(--pulse)}
 .btn.primary:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(37,99,235,.35)}
@@ -50,6 +51,7 @@ textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .history-item button{width:100%;text-align:left;background:transparent;border:0;color:#0f172a;cursor:pointer;padding:0;font:inherit}
 .history-item strong{display:block;font-size:13px}
 .history-item small{display:block;color:#6b7280;margin-top:4px}
+.google-login-container{margin-top:10px;min-height:40px}
 [hidden]{display:none !important}
 
 /* SKY THEME */

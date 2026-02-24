@@ -51,6 +51,8 @@
       history: "simplify.history.v1",
       prefs: "simplify.prefs.v1",
       customerId: "simplify.customerId.v1",
+      authToken: "simplify.authToken.v1",
+      authUser: "simplify.authUser.v1",
     },
     backend: {
       endpoint: "http://localhost:8787/api/ai/generate",
@@ -67,9 +69,20 @@
       checkoutPath: "/api/pay/checkout",
       balancePath: "/api/pay/balance",
       consumePath: "/api/pay/consume",
+      adminMetricsPath: "/api/admin/metrics",
+      adminReconcilePath: "/api/admin/reconcile/payments",
       oneCredits: 1,
       packCredits: 10,
       subCreditsPerCycle: 250,
+    },
+    auth: {
+      apiBase: "http://localhost:8787",
+      anonymousPath: "/api/auth/session/anonymous",
+      mePath: "/api/auth/me",
+      emailRequestPath: "/api/auth/email/request-code",
+      emailVerifyPath: "/api/auth/email/verify-code",
+      googlePath: "/api/auth/google",
+      googleClientId: "",
     },
   };
 
@@ -79,6 +92,7 @@
   merged.storage = Object.assign({}, defaults.storage, incoming.storage || {});
   merged.backend = Object.assign({}, defaults.backend, incoming.backend || {});
   merged.monetization = Object.assign({}, defaults.monetization, incoming.monetization || {});
+  merged.auth = Object.assign({}, defaults.auth, incoming.auth || {});
 
   global.SIMPLIFY_PAY_CONFIG = Object.freeze(merged);
 })(window);
