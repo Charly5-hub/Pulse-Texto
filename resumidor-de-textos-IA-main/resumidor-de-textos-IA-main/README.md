@@ -11,6 +11,7 @@ Aplicación de transformación de texto con enfoque productivo (2026): UX rápid
   - historial local,
   - control de modos IA (auto/remoto/local),
   - login por email OTP + Google,
+  - captura de canal de adquisición (`utm_source`) para segmentación de recovery,
   - checkout con consentimiento legal y conciliación de pago por `session_id`,
   - panel admin de métricas/reconciliación.
 - Backend Node.js + Postgres con:
@@ -18,7 +19,7 @@ Aplicación de transformación de texto con enfoque productivo (2026): UX rápid
   - prompt hardening por estilo narrativo + control de temperatura por estilo,
   - límites por plan/tier (free/one/pack/sub) en tamaño de input,
   - Stripe Checkout + webhook idempotente,
-  - recuperación de checkout abandonado por email (sweep automático + trigger admin),
+  - recuperación de checkout abandonado por email en secuencia (1h/24h/72h), con A/B de asunto y segmentación por plan/canal,
   - ledger de créditos en PostgreSQL,
   - auth JWT (anónimo, email OTP, Google),
   - consentimiento legal versionado (`/api/legal/*`),
@@ -132,7 +133,7 @@ Opcionales importantes:
 - SMTP (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`)
 - precios y créditos (`PRICE_*`, `CREDIT_*`, `FREE_USES`)
 - legal/compliance (`LEGAL_VERSION`, `LEGAL_REQUIRE_CHECKOUT_CONSENT`)
-- unit economics / retention (`MARKETING_SPEND_MONTHLY_CENTS`, `RECOVERY_*`, `MAX_INPUT_*`)
+- unit economics / retention (`MARKETING_SPEND_MONTHLY_CENTS`, `RECOVERY_*`, `RECOVERY_SEQUENCE_HOURS`, `RECOVERY_AB_ENABLED`, `MAX_INPUT_*`)
 
 ## Endpoints principales
 
@@ -196,6 +197,8 @@ Cobertura actual del flujo:
 - sesión anónima + login email OTP,
 - consumo de cuota en generación IA,
 - acreditación admin y consumo de créditos,
+- límites por plan/tier y asignación admin,
+- recuperación checkout (secuencia + A/B + segmentación),
 - métricas admin.
 
 ## Tests E2E frontend (Playwright)
@@ -237,7 +240,7 @@ psql "$DATABASE_URL" -f backend/sql/dashboard_queries.sql
 - La generación IA aplica límites por plan/tier para proteger coste y experiencia.
 - Checkout exige consentimiento legal versionado antes de cobro.
 - Retorno de pago usa conciliación por `session_id` para reducir fricción por latencia webhook.
-- Recuperación de checkout abandonado por email (con límite de intentos y trazabilidad de eventos).
+- Recuperación de checkout abandonado por email en secuencia (1h/24h/72h), con A/B de asunto y segmentación por canal/plan.
 - Admin protegido por `x-admin-key` o rol `admin` en JWT.
 - Rate limiting anti-abuso por IP/usuario en auth, IA, eventos, checkout y admin.
 - Headers de seguridad en backend (nosniff, frame deny, referrer, permissions, COOP/CORP, HSTS bajo HTTPS).

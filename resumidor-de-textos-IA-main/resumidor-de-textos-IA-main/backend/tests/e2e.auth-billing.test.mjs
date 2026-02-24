@@ -63,6 +63,9 @@ before(async () => {
   process.env.FRONTEND_ORIGINS = "http://localhost:4173";
   process.env.SHOW_DEV_OTP = "1";
   process.env.FREE_USES = "3";
+  process.env.RECOVERY_SEQUENCE_HOURS = "1,24,72";
+  process.env.RECOVERY_MAX_ATTEMPTS = "3";
+  process.env.RECOVERY_AB_ENABLED = "1";
 
   backend = require("../server.js");
   const started = await backend.startServer({ port: 0, host: "127.0.0.1" });
@@ -316,8 +319,9 @@ test("plan limits are enforced and can be upgraded by admin", async () => {
 });
 
 test("checkout recovery sweep processes pending sessions", async () => {
+  const createdAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   await backend.pool.query(
-    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, recovery_attempts, created_at, updated_at) VALUES ($1,$2,$3,$4,'created',NULL,$5,$6,false,0,$7,$8)",
+    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, acquisition_channel, recovery_attempts, created_at, updated_at) VALUES ($1,$2,$3,$4,'created',NULL,$5,$6,false,$7,0,$8,$9)",
     [
       "cs_recovery_test_001",
       userId,
@@ -325,7 +329,8 @@ test("checkout recovery sweep processes pending sessions", async () => {
       "pack",
       "eur",
       10,
-      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      "ads",
+      createdAt,
       new Date().toISOString(),
     ]
   );
@@ -340,14 +345,65 @@ test("checkout recovery sweep processes pending sessions", async () => {
   );
   assert.equal(run.ok, true);
   assert.ok(run.candidates >= 1);
-  assert.ok(run.emailed >= 1 || run.reconciled >= 1);
+  assert.ok(run.emailed >= 1);
+  assert.deepEqual(run.sequenceHours, [1, 24, 72]);
 
   const row = await backend.pool.query(
-    "SELECT recovery_attempts, recovery_email_sent_at FROM payment_sessions WHERE session_id = $1",
+    "SELECT recovery_attempts, recovery_email_sent_at, recovery_last_variant, recovery_last_step, recovery_next_attempt_at FROM payment_sessions WHERE session_id = $1",
     ["cs_recovery_test_001"]
   );
   assert.equal(row.rowCount, 1);
-  assert.ok(Number(row.rows[0].recovery_attempts || 0) >= 1);
+  assert.equal(Number(row.rows[0].recovery_attempts || 0), 1);
+  assert.equal(Number(row.rows[0].recovery_last_step || 0), 1);
+  assert.ok(["A", "B"].includes(String(row.rows[0].recovery_last_variant || "")));
+  assert.ok(row.rows[0].recovery_next_attempt_at);
+
+  const eventRows = await backend.pool.query(
+    "SELECT payload FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND payload->>'sessionId' = $1 ORDER BY id ASC",
+    ["cs_recovery_test_001"]
+  );
+  assert.ok(eventRows.rowCount >= 1);
+  const firstPayload = eventRows.rows[0].payload;
+  assert.equal(String(firstPayload.stepNumber), "1");
+  assert.equal(String(firstPayload.segmentPlan), "pack");
+  assert.equal(String(firstPayload.segmentChannel), "paid");
+  assert.ok(["A", "B"].includes(String(firstPayload.variant || "")));
+
+  await backend.pool.query(
+    "UPDATE payment_sessions SET recovery_next_attempt_at = NOW() WHERE session_id = $1",
+    ["cs_recovery_test_001"]
+  );
+  const runBlockedBySequence = await requestJSON(
+    "POST",
+    "/api/admin/recovery/checkout/run",
+    {
+      limit: 20,
+    },
+    { "x-admin-key": "test-admin-key" }
+  );
+  assert.equal(runBlockedBySequence.ok, true);
+  assert.equal(Number(runBlockedBySequence.emailed || 0), 0);
+  assert.ok(Number(runBlockedBySequence.notReady || 0) >= 1);
+
+  const runForced = await requestJSON(
+    "POST",
+    "/api/admin/recovery/checkout/run",
+    {
+      limit: 20,
+      force: true,
+    },
+    { "x-admin-key": "test-admin-key" }
+  );
+  assert.equal(runForced.ok, true);
+  assert.ok(Number(runForced.emailed || 0) >= 1);
+
+  const rowAfterForce = await backend.pool.query(
+    "SELECT recovery_attempts, recovery_last_step FROM payment_sessions WHERE session_id = $1",
+    ["cs_recovery_test_001"]
+  );
+  assert.equal(rowAfterForce.rowCount, 1);
+  assert.equal(Number(rowAfterForce.rows[0].recovery_attempts || 0), 2);
+  assert.equal(Number(rowAfterForce.rows[0].recovery_last_step || 0), 2);
 });
 
 test("admin metrics endpoint returns kpis and funnel", async () => {
@@ -363,6 +419,8 @@ test("admin metrics endpoint returns kpis and funnel", async () => {
   assert.ok(typeof metrics.funnel.generationCompleted === "number");
   assert.ok(typeof metrics.unitEconomics.ltvCacRatio === "number");
   assert.ok(typeof metrics.checkoutRecovery.conversionRatePct === "number");
+  assert.ok(Array.isArray(metrics.checkoutRecovery.byVariant));
+  assert.ok(Array.isArray(metrics.checkoutRecovery.bySegment));
   assert.ok(Array.isArray(metrics.events));
   assert.ok(Array.isArray(metrics.dailyEvents));
 });

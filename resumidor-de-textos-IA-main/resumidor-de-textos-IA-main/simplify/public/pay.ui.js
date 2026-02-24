@@ -153,6 +153,7 @@
     var legalVersion = toNonEmptyString(legal.currentVersion || "2026-02");
     var legalRequireForCheckout = legal.requireForCheckout !== false;
     var legalConsentVersionKey = toNonEmptyString(storage.legalConsentVersion || "simplify.legalConsentVersion.v1");
+    var acquisitionChannelKey = toNonEmptyString(storage.acquisitionChannel || "simplify.acquisitionChannel.v1");
 
     var oneButton = document.getElementById("pay-one");
     var packButton = document.getElementById("pay-pack");
@@ -181,6 +182,45 @@
 
     function getLegalPayloadSource() {
       return "pay-ui-checkout";
+    }
+
+    function normalizeChannel(value) {
+      return toNonEmptyString(value)
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]/g, "")
+        .slice(0, 40);
+    }
+
+    function inferReferrerChannel() {
+      var ref = toNonEmptyString(global.document && global.document.referrer);
+      if (!ref) {
+        return "direct";
+      }
+      try {
+        var refURL = new URL(ref);
+        if (refURL.origin === global.location.origin) {
+          return "direct";
+        }
+      } catch (_error) {
+        // Ignore parse errors and fallback.
+      }
+      return "referral";
+    }
+
+    function getAcquisitionChannel() {
+      var params = new URLSearchParams(global.location.search);
+      var fromURL = normalizeChannel(params.get("utm_source") || params.get("channel") || "");
+      if (fromURL) {
+        safeSet(acquisitionChannelKey, fromURL);
+        return fromURL;
+      }
+      var stored = normalizeChannel(safeGet(acquisitionChannelKey));
+      if (stored) {
+        return stored;
+      }
+      var inferred = inferReferrerChannel();
+      safeSet(acquisitionChannelKey, inferred);
+      return inferred;
     }
 
     function track(eventName, payload) {
@@ -315,9 +355,10 @@
 
     function beginCheckout(planId, button) {
       var checkoutURL = apiBase + (checkoutPath.charAt(0) === "/" ? checkoutPath : "/" + checkoutPath);
+      var acquisitionChannel = getAcquisitionChannel();
       setButtonBusy(button, true);
       setStatus("Validando consentimiento legal…");
-      track("checkout_started", { plan: planId });
+      track("checkout_started", { plan: planId, acquisitionChannel: acquisitionChannel });
 
       ensureLegalConsent().then(function () {
         setStatus("Preparando checkout seguro…");
@@ -329,6 +370,7 @@
             customerId: guard.getCustomerId(),
             legalVersion: legalVersion,
             acceptLegal: Boolean(legalCheckbox && legalCheckbox.checked),
+            acquisitionChannel: acquisitionChannel,
           }),
         });
       }).then(function (payload) {

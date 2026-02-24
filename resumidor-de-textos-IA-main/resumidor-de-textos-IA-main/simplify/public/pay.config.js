@@ -52,6 +52,7 @@
       prefs: "simplify.prefs.v1",
       customerId: "simplify.customerId.v1",
       planTier: "simplify.planTier.v1",
+      acquisitionChannel: "simplify.acquisitionChannel.v1",
       authToken: "simplify.authToken.v1",
       authUser: "simplify.authUser.v1",
       legalConsentVersion: "simplify.legalConsentVersion.v1",

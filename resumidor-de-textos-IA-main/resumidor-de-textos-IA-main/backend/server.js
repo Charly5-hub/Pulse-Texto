@@ -52,8 +52,10 @@ const CONFIG = {
   marketingSpendMonthlyCents: readNumber("MARKETING_SPEND_MONTHLY_CENTS", 0),
   recoverySweepMinutes: Math.max(1, readNumber("RECOVERY_SWEEP_MINUTES", 15)),
   recoveryDelayMinutes: Math.max(1, readNumber("RECOVERY_DELAY_MINUTES", 45)),
-  recoveryMaxAttempts: Math.max(1, readNumber("RECOVERY_MAX_ATTEMPTS", 2)),
+  recoveryMaxAttempts: Math.max(1, readNumber("RECOVERY_MAX_ATTEMPTS", 3)),
   recoveryBatchSize: Math.max(1, Math.min(100, readNumber("RECOVERY_BATCH_SIZE", 25))),
+  recoverySequenceHours: parseRecoverySequenceHours(String(process.env.RECOVERY_SEQUENCE_HOURS || "1,24,72")),
+  recoveryABEnabled: String(process.env.RECOVERY_AB_ENABLED || "1").trim() !== "0",
   maxInputFree: Math.max(500, readNumber("MAX_INPUT_FREE", 8000)),
   maxInputOne: Math.max(1000, readNumber("MAX_INPUT_ONE", 12000)),
   maxInputPack: Math.max(1000, readNumber("MAX_INPUT_PACK", 20000)),
@@ -318,8 +320,10 @@ app.get("/api/health", async function healthHandler(_req, res) {
       },
       recovery: {
         sweepMinutes: CONFIG.recoverySweepMinutes,
-        delayMinutes: CONFIG.recoveryDelayMinutes,
+        sequenceHours: CONFIG.recoverySequenceHours,
+        firstDelayMinutes: Math.round((CONFIG.recoverySequenceHours[0] || 1) * 60),
         maxAttempts: CONFIG.recoveryMaxAttempts,
+        abEnabled: CONFIG.recoveryABEnabled,
       },
       planLimits: PLAN_LIMITS,
       plans: publicPlans(),
@@ -640,6 +644,9 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
         throw createError("customerId es obligatorio para iniciar checkout.", 400);
       }
       var legalVersion = normalizeLegalVersion(req.body && req.body.legalVersion) || CONFIG.legalVersion;
+      var acquisitionChannel = normalizeAcquisitionChannel(
+        req.body && (req.body.acquisitionChannel || req.body.channel || req.body.utmSource)
+      ) || "direct";
       if (CONFIG.legalRequireCheckoutConsent) {
         if (Boolean(req.body && req.body.acceptLegal)) {
           await upsertLegalConsent(client, resolved, legalVersion, "checkout-inline", req);
@@ -652,10 +659,12 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
       return {
         actor: resolved,
         legalVersion: legalVersion,
+        acquisitionChannel: acquisitionChannel,
       };
     });
     const actor = checkoutContext.actor;
     const legalVersion = checkoutContext.legalVersion;
+    const acquisitionChannel = checkoutContext.acquisitionChannel;
 
     const metadata = {
       user_id: actor.id,
@@ -663,6 +672,7 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
       plan: plan.id,
       credits_granted: String(plan.credits),
       legal_version: legalVersion,
+      acquisition_channel: acquisitionChannel,
     };
 
     const params = {
@@ -684,13 +694,14 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
 
     await withTransaction(async function tx(client) {
       await client.query(
-        "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'created',NULL,$5,$6,false,NULL,NULL,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, updated_at = NOW()",
-        [session.id, actor.id, actor.customer_id, plan.id, CONFIG.priceCurrency, plan.credits]
+        "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, acquisition_channel, created_at, updated_at) VALUES ($1,$2,$3,$4,'created',NULL,$5,$6,false,NULL,NULL,$7,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, acquisition_channel = COALESCE(EXCLUDED.acquisition_channel, payment_sessions.acquisition_channel), updated_at = NOW()",
+        [session.id, actor.id, actor.customer_id, plan.id, CONFIG.priceCurrency, plan.credits, acquisitionChannel]
       );
       await recordEvent(client, "checkout_started", actor.id, actor.customer_id, {
         plan: plan.id,
         sessionId: session.id,
         legalVersion: legalVersion,
+        acquisitionChannel: acquisitionChannel,
       });
     });
 
@@ -701,6 +712,7 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
       plan: plan.id,
       customerId: actor.customer_id,
       legalVersion: legalVersion,
+      acquisitionChannel: acquisitionChannel,
     });
   } catch (error) {
     const status = Number(error && error.statusCode) || 500;
@@ -1063,7 +1075,15 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
       );
       const recoveryStats = await client.query(
         "SELECT COALESCE(SUM(CASE WHEN recovery_email_sent_at IS NOT NULL THEN 1 ELSE 0 END),0)::int AS sent, COALESCE(SUM(CASE WHEN recovery_email_sent_at IS NOT NULL AND status = 'completed' THEN 1 ELSE 0 END),0)::int AS converted, COALESCE(SUM(CASE WHEN status IN ('created','pending') AND created_at <= $1 THEN 1 ELSE 0 END),0)::int AS candidates FROM payment_sessions",
-        [new Date(Date.now() - CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString()]
+        [new Date(Date.now() - getFirstRecoveryDelayMinutes() * 60 * 1000).toISOString()]
+      );
+      const recoveryVariantStats = await client.query(
+        "SELECT COALESCE(payload->>'variant','A') AS variant, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1 ORDER BY 1 ASC",
+        [since.toISOString()]
+      );
+      const recoverySegmentStats = await client.query(
+        "SELECT COALESCE(payload->>'segmentPlan','free') AS plan_tier, COALESCE(payload->>'segmentChannel','direct') AS channel, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1,2 ORDER BY total DESC",
+        [since.toISOString()]
       );
       const eventsStats = await client.query(
         "SELECT event_name, COUNT(*)::int AS total FROM app_events WHERE created_at >= $1 GROUP BY event_name ORDER BY total DESC",
@@ -1091,6 +1111,8 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         marketingSpendWindow: marketingSpendStats.rows[0],
         legalConsents: legalStats.rows,
         recovery: recoveryStats.rows[0],
+        recoveryByVariant: recoveryVariantStats.rows,
+        recoveryBySegment: recoverySegmentStats.rows,
         events: eventsStats.rows,
         topActions: actionStats.rows,
         dailyEvents: dailyEvents.rows,
@@ -1162,6 +1184,9 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         sent: recoverySent,
         converted: recoveryConverted,
         conversionRatePct: recoverySent > 0 ? Number(((recoveryConverted / recoverySent) * 100).toFixed(2)) : 0,
+        byVariant: summary.recoveryByVariant,
+        bySegment: summary.recoveryBySegment,
+        sequenceHours: getRecoverySequenceHours(),
       },
       events: summary.events,
       legalConsents: summary.legalConsents,
@@ -1313,12 +1338,13 @@ app.post("/api/admin/marketing/spend", requireAdmin, RATE_LIMITERS.adminWrite, a
 app.post("/api/admin/recovery/checkout/run", requireAdmin, RATE_LIMITERS.adminWrite, async function runCheckoutRecovery(req, res) {
   const limit = Math.max(1, Math.min(100, toPositiveInt(req.body && req.body.limit, CONFIG.recoveryBatchSize)));
   const dryRun = Boolean(req.body && req.body.dryRun);
+  const force = Boolean(req.body && req.body.force);
   try {
     const result = await runCheckoutRecoverySweep({
       trigger: "admin",
       limit: limit,
       dryRun: dryRun,
-      force: true,
+      force: force,
     });
     res.json(Object.assign({ ok: true }, result));
   } catch (error) {
@@ -1331,9 +1357,10 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   try {
     const stats = await withTransaction(async function tx(client) {
+      const firstRecoveryDelayMinutes = getFirstRecoveryDelayMinutes();
       const candidates = await client.query(
         "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE status IN ('created','pending') AND created_at <= $1",
-        [new Date(Date.now() - CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString()]
+        [new Date(Date.now() - firstRecoveryDelayMinutes * 60 * 1000).toISOString()]
       );
       const sent = await client.query(
         "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE recovery_email_sent_at IS NOT NULL AND recovery_email_sent_at >= $1",
@@ -1343,10 +1370,20 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
         "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE status = 'completed' AND recovery_email_sent_at IS NOT NULL AND updated_at >= $1",
         [since.toISOString()]
       );
+      const byStep = await client.query(
+        "SELECT COALESCE(payload->>'stepNumber','0') AS step, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1 ORDER BY 1 ASC",
+        [since.toISOString()]
+      );
+      const byVariant = await client.query(
+        "SELECT COALESCE(payload->>'variant','A') AS variant, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1 ORDER BY 1 ASC",
+        [since.toISOString()]
+      );
       return {
         candidates: Number(candidates.rows[0].total || 0),
         sent: Number(sent.rows[0].total || 0),
         converted: Number(converted.rows[0].total || 0),
+        byStep: byStep.rows,
+        byVariant: byVariant.rows,
       };
     });
 
@@ -1358,6 +1395,9 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
         sent: stats.sent,
         converted: stats.converted,
         conversionRatePct: stats.sent > 0 ? Number(((stats.converted / stats.sent) * 100).toFixed(2)) : 0,
+        byStep: stats.byStep,
+        byVariant: stats.byVariant,
+        sequenceHours: getRecoverySequenceHours(),
       },
     });
   } catch (error) {
@@ -1564,24 +1604,192 @@ function buildCheckoutRecoveryURL(sessionId, stripeSession) {
   return CONFIG.appBaseURL + "/?checkout=resume&session_id=" + encodeURIComponent(sessionId);
 }
 
-async function sendCheckoutRecoveryEmail(candidate, checkoutURL) {
+function getRecoverySequenceHours() {
+  var fromConfig = Array.isArray(CONFIG.recoverySequenceHours) ? CONFIG.recoverySequenceHours : [];
+  var fallbackHours = [Math.max(1, Math.ceil(CONFIG.recoveryDelayMinutes / 60))];
+  var sequence = fromConfig.length > 0 ? fromConfig : fallbackHours;
+  var maxSteps = Math.max(1, CONFIG.recoveryMaxAttempts);
+  return sequence.slice(0, maxSteps);
+}
+
+function getRecoveryTotalSteps() {
+  return getRecoverySequenceHours().length;
+}
+
+function getFirstRecoveryDelayMinutes() {
+  var sequence = getRecoverySequenceHours();
+  return Math.max(1, Math.round((sequence[0] || 1) * 60));
+}
+
+function getRecoveryScheduleForAttempt(createdAtInput, attemptsCompleted) {
+  var createdAt = new Date(createdAtInput);
+  if (Number.isNaN(createdAt.getTime())) {
+    createdAt = new Date();
+  }
+  var sequence = getRecoverySequenceHours();
+  var attempts = Math.max(0, Number(attemptsCompleted) || 0);
+  if (attempts >= sequence.length) {
+    return {
+      done: true,
+      stepNumber: attempts + 1,
+      eligibleAt: null,
+      nextAttemptAt: null,
+      totalSteps: sequence.length,
+    };
+  }
+  var eligibleAt = new Date(createdAt.getTime() + sequence[attempts] * 60 * 60 * 1000);
+  var nextAttemptAt = null;
+  if ((attempts + 1) < sequence.length) {
+    nextAttemptAt = new Date(createdAt.getTime() + sequence[attempts + 1] * 60 * 60 * 1000);
+  }
+  return {
+    done: false,
+    stepNumber: attempts + 1,
+    eligibleAt: eligibleAt,
+    nextAttemptAt: nextAttemptAt,
+    totalSteps: sequence.length,
+  };
+}
+
+function classifyAcquisitionChannel(channelValue) {
+  var normalized = normalizeAcquisitionChannel(channelValue) || "direct";
+  if (["ads", "paid", "cpc", "ppc", "meta", "facebook", "googleads", "tiktok", "display"].includes(normalized)) {
+    return "paid";
+  }
+  if (["seo", "organic", "blog", "content"].includes(normalized)) {
+    return "organic";
+  }
+  if (["referral", "afiliados", "affiliate", "partner", "partners"].includes(normalized)) {
+    return "partner";
+  }
+  if (normalized === "email") {
+    return "email";
+  }
+  if (normalized === "direct") {
+    return "direct";
+  }
+  return "other";
+}
+
+function resolveRecoveryPlanTier(candidate) {
+  var fromCredits = normalizePlanTier(candidate && candidate.plan_tier);
+  if (fromCredits) {
+    return fromCredits;
+  }
+  return mapPlanIdToTier(candidate && candidate.plan_id);
+}
+
+function chooseRecoveryVariant(sessionId, stepNumber) {
+  if (!CONFIG.recoveryABEnabled) {
+    return "A";
+  }
+  var seed = String(sessionId || "") + ":" + String(stepNumber || 0);
+  var hash = 0;
+  for (var i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) % 100000;
+  }
+  return hash % 2 === 0 ? "A" : "B";
+}
+
+function buildRecoverySubject(context) {
+  var variant = String(context && context.variant || "A");
+  var step = Math.max(1, Number(context && context.stepNumber || 1));
+  var segmentPlan = String(context && context.segmentPlan || "free");
+
+  if (variant === "B") {
+    if (step >= 3) {
+      return "Último recordatorio: tu checkout en Simplify sigue disponible";
+    }
+    if (step === 2) {
+      return "Tus créditos en Simplify siguen esperando (" + segmentPlan + ")";
+    }
+    return "Te guardamos tu compra: retómala en 1 clic";
+  }
+
+  if (step >= 3) {
+    return "¿Aún quieres completar tu compra en Simplify?";
+  }
+  if (step === 2) {
+    return "Tu compra en Simplify sigue pendiente";
+  }
+  return "Recordatorio: tu checkout de Simplify está listo";
+}
+
+function buildRecoveryCopyContext(candidate, recoveryContext) {
+  var planTier = String(recoveryContext && recoveryContext.planTier || "free");
+  var segmentChannel = String(recoveryContext && recoveryContext.segmentChannel || "direct");
+  var planCopy = "activa tus créditos para seguir generando textos sin fricción.";
+  if (planTier === "pack") {
+    planCopy = "tu pack de créditos sigue reservado para que continúes con volumen.";
+  } else if (planTier === "sub") {
+    planCopy = "tu suscripción mensual sigue disponible para activar uso ilimitado por ciclo.";
+  } else if (planTier === "one") {
+    planCopy = "tu compra de uso puntual sigue disponible para completar.";
+  }
+
+  var channelCopy = "te lo recordamos por si te interrumpieron durante el proceso.";
+  if (segmentChannel === "paid") {
+    channelCopy = "mantenemos tu contexto de campaña para que retomes rápido.";
+  } else if (segmentChannel === "organic") {
+    channelCopy = "te lo dejamos por si estabas comparando opciones con calma.";
+  } else if (segmentChannel === "partner") {
+    channelCopy = "mantenemos la referencia de tu acceso por partner/invitación.";
+  } else if (segmentChannel === "email") {
+    channelCopy = "te lo recordamos porque llegaste por comunicación directa.";
+  }
+
+  var stepNumber = Math.max(1, Number(recoveryContext && recoveryContext.stepNumber || 1));
+  var totalSteps = Math.max(stepNumber, Number(recoveryContext && recoveryContext.totalSteps || stepNumber));
+  var stepCopy = "Seguimiento " + stepNumber + " de " + totalSteps + ".";
+
+  return {
+    planCopy: planCopy,
+    channelCopy: channelCopy,
+    stepCopy: stepCopy,
+    customerName: candidate && candidate.name ? String(candidate.name).trim() : "",
+  };
+}
+
+function buildRecoveryEmailPayload(candidate, checkoutURL, recoveryContext) {
+  var copy = buildRecoveryCopyContext(candidate, recoveryContext);
+  var subject = buildRecoverySubject({
+    variant: recoveryContext.variant,
+    stepNumber: recoveryContext.stepNumber,
+    segmentPlan: recoveryContext.planTier,
+  });
+  var text = [
+    "Hola" + (copy.customerName ? " " + copy.customerName : "") + ",",
+    "",
+    "Vimos que dejaste tu compra sin completar.",
+    copy.planCopy,
+    copy.channelCopy,
+    copy.stepCopy,
+    "",
+    "Retoma tu checkout seguro aquí:",
+    checkoutURL,
+    "",
+    "Si ya completaste el pago, puedes ignorar este correo.",
+    "",
+    "Equipo Simplify",
+  ].join("\n");
+  return {
+    subject: subject,
+    text: text,
+  };
+}
+
+async function sendCheckoutRecoveryEmail(candidate, checkoutURL, recoveryContext) {
   const email = String(candidate && candidate.email || "").trim().toLowerCase();
   if (!email) {
     throw createError("No hay email para recuperación.", 400);
   }
-  const subject = "Tu compra en Simplify sigue pendiente";
-  const text = [
-    "Hola" + (candidate && candidate.name ? " " + String(candidate.name).trim() : "") + ",",
-    "",
-    "Vimos que dejaste una compra de créditos/suscripción sin completar.",
-    "Puedes retomarla desde este enlace seguro:",
-    checkoutURL,
-    "",
-    "Si ya completaste el pago, ignora este correo.",
-    "",
-    "Equipo Simplify",
-  ].join("\n");
-  return deliverEmail(email, subject, text);
+
+  const payload = buildRecoveryEmailPayload(candidate, checkoutURL, recoveryContext);
+  const delivery = await deliverEmail(email, payload.subject, payload.text);
+  return {
+    delivery: delivery,
+    subject: payload.subject,
+  };
 }
 
 function startCheckoutRecoveryTimer() {
@@ -1627,7 +1835,10 @@ async function runCheckoutRecoverySweep(options) {
       trigger: opts.trigger,
       skipped: true,
       reason: "already-running",
+      scanned: 0,
       candidates: 0,
+      notReady: 0,
+      wouldEmail: 0,
       emailed: 0,
       reconciled: 0,
       failed: 0,
@@ -1638,8 +1849,7 @@ async function runCheckoutRecoverySweep(options) {
   recoverySweepRunning = true;
   const now = new Date();
   const nowIso = now.toISOString();
-  const candidateBeforeIso = new Date(now.getTime() - CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString();
-  const nextAttemptIso = new Date(now.getTime() + CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString();
+  const totalSteps = getRecoveryTotalSteps();
 
   try {
     const candidates = await withTransaction(async function tx(client) {
@@ -1647,30 +1857,56 @@ async function runCheckoutRecoverySweep(options) {
         [
           "SELECT",
           "ps.session_id, ps.user_id, ps.customer_id, ps.plan_id, ps.created_at,",
+          "ps.acquisition_channel,",
           "COALESCE(ps.recovery_attempts, 0)::int AS recovery_attempts,",
           "ps.recovery_email_sent_at, ps.recovery_next_attempt_at,",
-          "u.email, u.name",
+          "u.email, u.name,",
+          "uc.plan_tier",
           "FROM payment_sessions ps",
           "LEFT JOIN app_users u ON u.id = ps.user_id",
+          "LEFT JOIN user_credits uc ON uc.user_id = ps.user_id",
           "WHERE ps.status IN ('created','pending')",
           "AND COALESCE(ps.recovery_attempts, 0) < $1",
-          "AND ps.created_at <= $2",
-          "AND (ps.recovery_next_attempt_at IS NULL OR ps.recovery_next_attempt_at <= $3)",
+          "AND (ps.recovery_next_attempt_at IS NULL OR ps.recovery_next_attempt_at <= $2 OR $3 = TRUE)",
           "ORDER BY ps.created_at ASC",
           "LIMIT $4",
         ].join(" "),
-        [CONFIG.recoveryMaxAttempts, candidateBeforeIso, nowIso, Math.max(1, Math.min(100, Number(opts.limit) || CONFIG.recoveryBatchSize))]
+        [totalSteps, nowIso, Boolean(opts.force), Math.max(1, Math.min(100, Number(opts.limit) || CONFIG.recoveryBatchSize))]
       );
       return rows.rows;
     });
 
+    let scanned = candidates.length;
+    let eligible = 0;
     let reconciled = 0;
     let emailed = 0;
     let failed = 0;
     let skippedNoEmail = 0;
+    let notReady = 0;
+    let wouldEmail = 0;
 
     for (let i = 0; i < candidates.length; i += 1) {
       const candidate = candidates[i];
+      const attemptsCompleted = Math.max(0, Number(candidate.recovery_attempts || 0));
+      const schedule = getRecoveryScheduleForAttempt(candidate.created_at, attemptsCompleted);
+      if (schedule.done) {
+        continue;
+      }
+      if (!opts.force && schedule.eligibleAt && schedule.eligibleAt.getTime() > now.getTime()) {
+        notReady += 1;
+        await withTransaction(async function tx(client) {
+          await client.query(
+            "UPDATE payment_sessions SET recovery_next_attempt_at = $2, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, schedule.eligibleAt.toISOString()]
+          );
+        });
+        continue;
+      }
+
+      eligible += 1;
+      const planTier = resolveRecoveryPlanTier(candidate);
+      const segmentChannel = classifyAcquisitionChannel(candidate.acquisition_channel);
+      const variant = chooseRecoveryVariant(candidate.session_id, schedule.stepNumber);
       let stripeSession = null;
       let checkoutURL = buildCheckoutRecoveryURL(candidate.session_id, null);
 
@@ -1693,14 +1929,20 @@ async function runCheckoutRecoverySweep(options) {
 
       if (!candidate.email) {
         skippedNoEmail += 1;
+        const nextAttemptIso = schedule.nextAttemptAt ? schedule.nextAttemptAt.toISOString() : null;
         await withTransaction(async function tx(client) {
           await client.query(
-            "UPDATE payment_sessions SET recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = $2, recovery_next_attempt_at = $3, updated_at = NOW() WHERE session_id = $1",
-            [candidate.session_id, "email-missing", nextAttemptIso]
+            "UPDATE payment_sessions SET recovery_attempts = $2, recovery_last_error = $3, recovery_next_attempt_at = $4, recovery_last_variant = $5, recovery_last_step = $6, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, totalSteps, "email-missing", nextAttemptIso, variant, schedule.stepNumber]
           );
           await recordEvent(client, "checkout_recovery_skipped", candidate.user_id || null, candidate.customer_id || null, {
             sessionId: candidate.session_id,
             reason: "email-missing",
+            stepNumber: schedule.stepNumber,
+            totalSteps: schedule.totalSteps,
+            variant: variant,
+            segmentPlan: planTier,
+            segmentChannel: segmentChannel,
             trigger: opts.trigger,
           });
         });
@@ -1708,34 +1950,55 @@ async function runCheckoutRecoverySweep(options) {
       }
 
       if (opts.dryRun) {
+        wouldEmail += 1;
         continue;
       }
 
       try {
-        const delivery = await sendCheckoutRecoveryEmail(candidate, checkoutURL);
+        const recoveryContext = {
+          stepNumber: schedule.stepNumber,
+          totalSteps: schedule.totalSteps,
+          variant: variant,
+          planTier: planTier,
+          segmentChannel: segmentChannel,
+        };
+        const emailResult = await sendCheckoutRecoveryEmail(candidate, checkoutURL, recoveryContext);
+        const nextAttemptIso = schedule.nextAttemptAt ? schedule.nextAttemptAt.toISOString() : null;
         emailed += 1;
         await withTransaction(async function tx(client) {
           await client.query(
-            "UPDATE payment_sessions SET status = 'pending', recovery_email_sent_at = NOW(), recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = NULL, recovery_next_attempt_at = $2, updated_at = NOW() WHERE session_id = $1",
-            [candidate.session_id, nextAttemptIso]
+            "UPDATE payment_sessions SET status = 'pending', recovery_email_sent_at = NOW(), recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = NULL, recovery_last_variant = $2, recovery_last_step = $3, recovery_next_attempt_at = $4, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, variant, schedule.stepNumber, nextAttemptIso]
           );
           await recordEvent(client, "checkout_recovery_email_sent", candidate.user_id || null, candidate.customer_id || null, {
             sessionId: candidate.session_id,
             planId: candidate.plan_id || "",
-            delivery: delivery,
+            planTier: planTier,
+            segmentChannel: segmentChannel,
+            stepNumber: schedule.stepNumber,
+            totalSteps: schedule.totalSteps,
+            variant: variant,
+            subject: emailResult.subject,
+            delivery: emailResult.delivery,
             trigger: opts.trigger,
           });
         });
       } catch (error) {
         failed += 1;
+        const nextAttemptIso = schedule.nextAttemptAt ? schedule.nextAttemptAt.toISOString() : null;
         await withTransaction(async function tx(client) {
           await client.query(
-            "UPDATE payment_sessions SET recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = $2, recovery_next_attempt_at = $3, updated_at = NOW() WHERE session_id = $1",
-            [candidate.session_id, String(error && error.message || error).slice(0, 180), nextAttemptIso]
+            "UPDATE payment_sessions SET recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = $2, recovery_last_variant = $3, recovery_last_step = $4, recovery_next_attempt_at = $5, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, String(error && error.message || error).slice(0, 180), variant, schedule.stepNumber, nextAttemptIso]
           );
           await recordEvent(client, "checkout_recovery_email_failed", candidate.user_id || null, candidate.customer_id || null, {
             sessionId: candidate.session_id,
             reason: String(error && error.message || error).slice(0, 180),
+            stepNumber: schedule.stepNumber,
+            totalSteps: schedule.totalSteps,
+            variant: variant,
+            planTier: planTier,
+            segmentChannel: segmentChannel,
             trigger: opts.trigger,
           });
         });
@@ -1746,11 +2009,15 @@ async function runCheckoutRecoverySweep(options) {
       trigger: opts.trigger,
       skipped: false,
       dryRun: Boolean(opts.dryRun),
-      candidates: candidates.length,
+      scanned: scanned,
+      candidates: eligible,
+      notReady: notReady,
+      wouldEmail: wouldEmail,
       emailed: emailed,
       reconciled: reconciled,
       failed: failed,
       skippedNoEmail: skippedNoEmail,
+      sequenceHours: getRecoverySequenceHours(),
     };
   } finally {
     recoverySweepRunning = false;
@@ -1891,7 +2158,7 @@ async function runMigrations() {
     "CREATE INDEX IF NOT EXISTS idx_app_users_customer_id ON app_users(customer_id)",
     "CREATE INDEX IF NOT EXISTS idx_app_users_email ON app_users(email)",
     "CREATE TABLE IF NOT EXISTS user_credits (user_id TEXT PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE, credits INTEGER NOT NULL DEFAULT 0 CHECK (credits >= 0), free_used INTEGER NOT NULL DEFAULT 0 CHECK (free_used >= 0), free_uses INTEGER NOT NULL DEFAULT 3 CHECK (free_uses >= 0), total_purchased INTEGER NOT NULL DEFAULT 0 CHECK (total_purchased >= 0), total_consumed INTEGER NOT NULL DEFAULT 0 CHECK (total_consumed >= 0), subscription_active BOOLEAN NOT NULL DEFAULT FALSE, subscription_credits_cycle INTEGER NOT NULL DEFAULT 250 CHECK (subscription_credits_cycle >= 0), plan_tier TEXT NOT NULL DEFAULT 'free', stripe_customer_id TEXT UNIQUE, stripe_subscription_id TEXT UNIQUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS payment_sessions (session_id TEXT PRIMARY KEY, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, customer_id TEXT NOT NULL, plan_id TEXT NOT NULL, status TEXT NOT NULL, amount_total INTEGER, currency TEXT NOT NULL, credits_granted INTEGER NOT NULL DEFAULT 0, granted BOOLEAN NOT NULL DEFAULT FALSE, stripe_customer_id TEXT, stripe_subscription_id TEXT, recovery_attempts INTEGER NOT NULL DEFAULT 0, recovery_email_sent_at TIMESTAMPTZ, recovery_next_attempt_at TIMESTAMPTZ, recovery_last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS payment_sessions (session_id TEXT PRIMARY KEY, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, customer_id TEXT NOT NULL, plan_id TEXT NOT NULL, status TEXT NOT NULL, amount_total INTEGER, currency TEXT NOT NULL, credits_granted INTEGER NOT NULL DEFAULT 0, granted BOOLEAN NOT NULL DEFAULT FALSE, stripe_customer_id TEXT, stripe_subscription_id TEXT, acquisition_channel TEXT, recovery_attempts INTEGER NOT NULL DEFAULT 0, recovery_email_sent_at TIMESTAMPTZ, recovery_next_attempt_at TIMESTAMPTZ, recovery_last_error TEXT, recovery_last_variant TEXT, recovery_last_step INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE INDEX IF NOT EXISTS idx_payment_sessions_user ON payment_sessions(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_payment_sessions_status ON payment_sessions(status)",
     "CREATE INDEX IF NOT EXISTS idx_payment_sessions_recovery_next_attempt ON payment_sessions(recovery_next_attempt_at)",
@@ -1911,6 +2178,9 @@ async function runMigrations() {
     "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_email_sent_at TIMESTAMPTZ",
     "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_next_attempt_at TIMESTAMPTZ",
     "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_last_error TEXT",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS acquisition_channel TEXT",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_last_variant TEXT",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_last_step INTEGER",
   ];
 
   for (let i = 0; i < ddl.length; i += 1) {
@@ -2160,6 +2430,7 @@ async function processCheckoutCompleted(client, session) {
   const metadataCustomerId = normalizeCustomerId(metadata.customer_id);
   const metadataPlan = String(metadata.plan || "").trim();
   const metadataCredits = Number(metadata.credits_granted);
+  const metadataAcquisitionChannel = normalizeAcquisitionChannel(metadata.acquisition_channel || metadata.channel) || "";
 
   let user = null;
   if (metadataUserId) {
@@ -2187,7 +2458,7 @@ async function processCheckoutCompleted(client, session) {
   const finalTier = chooseHigherPlanTier(user.plan_tier, purchasedTier, Boolean(user.subscription_active || session.subscription));
 
   await client.query(
-    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, recovery_last_error, recovery_next_attempt_at, created_at, updated_at) VALUES ($1,$2,$3,$4,'completed',$5,$6,$7,$8,$9,$10,NULL,NULL,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, amount_total = EXCLUDED.amount_total, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, granted = EXCLUDED.granted, stripe_customer_id = EXCLUDED.stripe_customer_id, stripe_subscription_id = EXCLUDED.stripe_subscription_id, recovery_last_error = NULL, recovery_next_attempt_at = NULL, updated_at = NOW()",
+    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, acquisition_channel, recovery_last_error, recovery_next_attempt_at, recovery_last_variant, recovery_last_step, created_at, updated_at) VALUES ($1,$2,$3,$4,'completed',$5,$6,$7,$8,$9,$10,$11,NULL,NULL,NULL,NULL,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, amount_total = EXCLUDED.amount_total, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, granted = EXCLUDED.granted, stripe_customer_id = EXCLUDED.stripe_customer_id, stripe_subscription_id = EXCLUDED.stripe_subscription_id, acquisition_channel = COALESCE(EXCLUDED.acquisition_channel, payment_sessions.acquisition_channel), recovery_last_error = NULL, recovery_next_attempt_at = NULL, updated_at = NOW()",
     [
       session.id,
       user.id,
@@ -2199,6 +2470,7 @@ async function processCheckoutCompleted(client, session) {
       grantedFlag,
       session.customer || null,
       session.subscription || null,
+      metadataAcquisitionChannel || null,
     ]
   );
 
@@ -2515,6 +2787,10 @@ function normalizeMarketingChannel(value) {
     .slice(0, 40);
 }
 
+function normalizeAcquisitionChannel(value) {
+  return normalizeMarketingChannel(value);
+}
+
 function hashForStorage(value) {
   const normalized = String(value || "").trim();
   if (!normalized) {
@@ -2675,6 +2951,25 @@ function readNumber(name, fallback) {
   const raw = process.env[name];
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseRecoverySequenceHours(rawValue) {
+  const parts = String(rawValue || "")
+    .split(",")
+    .map(function mapPiece(piece) {
+      const parsed = Number(String(piece || "").trim());
+      if (!Number.isFinite(parsed)) {
+        return 0;
+      }
+      return Math.max(1, Math.floor(parsed));
+    })
+    .filter(function keepPositive(value) {
+      return value > 0;
+    });
+  if (parts.length === 0) {
+    return [1, 24, 72];
+  }
+  return parts.slice(0, 6);
 }
 
 function isIgnorableMigrationError(error, statement) {
