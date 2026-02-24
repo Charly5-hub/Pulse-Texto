@@ -1077,12 +1077,8 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         "SELECT COALESCE(SUM(CASE WHEN recovery_email_sent_at IS NOT NULL THEN 1 ELSE 0 END),0)::int AS sent, COALESCE(SUM(CASE WHEN recovery_email_sent_at IS NOT NULL AND status = 'completed' THEN 1 ELSE 0 END),0)::int AS converted, COALESCE(SUM(CASE WHEN status IN ('created','pending') AND created_at <= $1 THEN 1 ELSE 0 END),0)::int AS candidates FROM payment_sessions",
         [new Date(Date.now() - getFirstRecoveryDelayMinutes() * 60 * 1000).toISOString()]
       );
-      const recoveryVariantStats = await client.query(
-        "SELECT COALESCE(payload->>'variant','A') AS variant, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1 ORDER BY 1 ASC",
-        [since.toISOString()]
-      );
-      const recoverySegmentStats = await client.query(
-        "SELECT COALESCE(payload->>'segmentPlan','free') AS plan_tier, COALESCE(payload->>'segmentChannel','direct') AS channel, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1,2 ORDER BY total DESC",
+      const recoveryEmailPayloads = await client.query(
+        "SELECT payload FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1",
         [since.toISOString()]
       );
       const eventsStats = await client.query(
@@ -1111,8 +1107,7 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         marketingSpendWindow: marketingSpendStats.rows[0],
         legalConsents: legalStats.rows,
         recovery: recoveryStats.rows[0],
-        recoveryByVariant: recoveryVariantStats.rows,
-        recoveryBySegment: recoverySegmentStats.rows,
+        recoveryEmailPayloads: recoveryEmailPayloads.rows,
         events: eventsStats.rows,
         topActions: actionStats.rows,
         dailyEvents: dailyEvents.rows,
@@ -1142,6 +1137,33 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
     const recoverySent = Number(summary.recovery.sent || 0);
     const recoveryConverted = Number(summary.recovery.converted || 0);
     const recoveryCandidates = Number(summary.recovery.candidates || 0);
+    const recoveryByVariantMap = {};
+    const recoveryBySegmentMap = {};
+    (summary.recoveryEmailPayloads || []).forEach(function eachRecoveryRow(row) {
+      var payload = row && row.payload && typeof row.payload === "object" ? row.payload : {};
+      var variant = String(payload.variant || "A");
+      var segmentPlan = String(payload.segmentPlan || payload.planTier || "free");
+      var segmentChannel = String(payload.segmentChannel || "direct");
+      recoveryByVariantMap[variant] = (recoveryByVariantMap[variant] || 0) + 1;
+      var key = segmentPlan + "|" + segmentChannel;
+      recoveryBySegmentMap[key] = (recoveryBySegmentMap[key] || 0) + 1;
+    });
+    const recoveryByVariant = Object.keys(recoveryByVariantMap).sort().map(function mapVariant(variant) {
+      return {
+        variant: variant,
+        total: recoveryByVariantMap[variant],
+      };
+    });
+    const recoveryBySegment = Object.keys(recoveryBySegmentMap).map(function mapSegment(key) {
+      var parts = key.split("|");
+      return {
+        plan_tier: parts[0] || "free",
+        channel: parts[1] || "direct",
+        total: recoveryBySegmentMap[key],
+      };
+    }).sort(function sortSegment(a, b) {
+      return Number(b.total || 0) - Number(a.total || 0);
+    });
 
     res.json({
       ok: true,
@@ -1184,8 +1206,8 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         sent: recoverySent,
         converted: recoveryConverted,
         conversionRatePct: recoverySent > 0 ? Number(((recoveryConverted / recoverySent) * 100).toFixed(2)) : 0,
-        byVariant: summary.recoveryByVariant,
-        bySegment: summary.recoveryBySegment,
+        byVariant: recoveryByVariant,
+        bySegment: recoveryBySegment,
         sequenceHours: getRecoverySequenceHours(),
       },
       events: summary.events,
@@ -1370,20 +1392,29 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
         "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE status = 'completed' AND recovery_email_sent_at IS NOT NULL AND updated_at >= $1",
         [since.toISOString()]
       );
-      const byStep = await client.query(
-        "SELECT COALESCE(payload->>'stepNumber','0') AS step, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1 ORDER BY 1 ASC",
+      const payloadRows = await client.query(
+        "SELECT payload FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1",
         [since.toISOString()]
       );
-      const byVariant = await client.query(
-        "SELECT COALESCE(payload->>'variant','A') AS variant, COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1 GROUP BY 1 ORDER BY 1 ASC",
-        [since.toISOString()]
-      );
+      const byStepMap = {};
+      const byVariantMap = {};
+      payloadRows.rows.forEach(function eachRow(row) {
+        var payload = row && row.payload && typeof row.payload === "object" ? row.payload : {};
+        var step = String(payload.stepNumber || "0");
+        var variant = String(payload.variant || "A");
+        byStepMap[step] = (byStepMap[step] || 0) + 1;
+        byVariantMap[variant] = (byVariantMap[variant] || 0) + 1;
+      });
       return {
         candidates: Number(candidates.rows[0].total || 0),
         sent: Number(sent.rows[0].total || 0),
         converted: Number(converted.rows[0].total || 0),
-        byStep: byStep.rows,
-        byVariant: byVariant.rows,
+        byStep: Object.keys(byStepMap).sort().map(function mapStep(step) {
+          return { step: step, total: byStepMap[step] };
+        }),
+        byVariant: Object.keys(byVariantMap).sort().map(function mapVariant(variant) {
+          return { variant: variant, total: byVariantMap[variant] };
+        }),
       };
     });
 
@@ -1974,6 +2005,7 @@ async function runCheckoutRecoverySweep(options) {
             sessionId: candidate.session_id,
             planId: candidate.plan_id || "",
             planTier: planTier,
+            segmentPlan: planTier,
             segmentChannel: segmentChannel,
             stepNumber: schedule.stepNumber,
             totalSteps: schedule.totalSteps,
@@ -1998,6 +2030,7 @@ async function runCheckoutRecoverySweep(options) {
             totalSteps: schedule.totalSteps,
             variant: variant,
             planTier: planTier,
+            segmentPlan: planTier,
             segmentChannel: segmentChannel,
             trigger: opts.trigger,
           });
