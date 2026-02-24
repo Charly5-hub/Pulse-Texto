@@ -19,6 +19,7 @@ textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .btn.outline{background:#fff;color:var(--pulse-700);border-color:var(--pulse)}
 .btn.ghost{background:linear-gradient(0deg,rgba(37,99,235,.07),rgba(37,99,235,.07)),#fff;color:var(--pulse-700);border-color:#c7d2fe}
 .btn:focus{outline:3px solid var(--ring);outline-offset:2px}
+.btn[aria-disabled="true"]{opacity:.65;pointer-events:none}
 
 .chips-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .chip-card{background:linear-gradient(180deg,#fff,#fafafa);border:1px solid var(--border);border-radius:14px;padding:12px;transition:transform .08s,box-shadow .12s}
@@ -28,6 +29,7 @@ textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .chip-btn{border:1px solid var(--border);background:#fff;border-radius:999px;padding:.35rem .7rem;font:500 13px/1 system-ui;cursor:pointer}
 .chip-btn:hover{background:#f3f6ff;box-shadow:0 4px 12px rgba(37,99,235,.18)}
 .chip-btn:focus{outline:3px solid var(--ring);outline-offset:2px}
+.chip-btn[aria-pressed="true"]{background:#eef2ff;border-color:#93c5fd;color:#1d4ed8;box-shadow:0 4px 10px rgba(37,99,235,.18)}
 
 .pay-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 

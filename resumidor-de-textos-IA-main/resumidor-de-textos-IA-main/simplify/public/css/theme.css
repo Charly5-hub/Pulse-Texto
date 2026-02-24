@@ -1,0 +1,6 @@
+/* Global theme hooks.
+   This file intentionally stays light to avoid visual regressions. */
+
+:root {
+  color-scheme: light;
+}

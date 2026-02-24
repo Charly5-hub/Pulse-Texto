@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="170" viewBox="0 0 640 170" role="img" aria-label="Simplify by Pulse">
+  <defs>
+    <linearGradient id="brand" x1="0%" x2="100%" y1="0%" y2="0%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="170" rx="24" fill="rgba(15,23,42,.08)"/>
+  <text x="30" y="95" fill="url(#brand)" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="64" font-weight="700">Simplify</text>
+  <text x="33" y="132" fill="#dbeafe" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="26" letter-spacing="2">BY PULSE</text>
+</svg>
