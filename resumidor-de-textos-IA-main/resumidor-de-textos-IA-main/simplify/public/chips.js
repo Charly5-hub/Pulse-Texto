@@ -9,6 +9,9 @@
     { id: "professional", label: "Tono profesional" },
     { id: "translate-en", label: "Traducir a EN" },
     { id: "translate-es", label: "Traducir a ES" },
+    { id: "email-pro", label: "Email profesional" },
+    { id: "linkedin-post", label: "Post de LinkedIn" },
+    { id: "meeting-notes", label: "Minuta de reunión" },
   ];
 
   var selectedActionId = "suggest";

@@ -9,6 +9,31 @@
     professional: "Tono profesional",
     "translate-en": "Traducir a EN",
     "translate-es": "Traducir a ES",
+    "email-pro": "Email profesional",
+    "linkedin-post": "Post para LinkedIn",
+    "meeting-notes": "Minuta de reunión",
+  };
+
+  var PROFILE_LABELS = {
+    general: "General",
+    study: "Estudio",
+    business: "Trabajo/Negocio",
+    content: "Contenido y RRSS",
+    support: "Soporte/Cliente",
+  };
+
+  var PROFILE_INSTRUCTIONS = {
+    general: "Entrega una salida clara, precisa y accionable.",
+    study: "Prioriza conceptos clave, definiciones y estructura para memorizar mejor.",
+    business: "Prioriza tono profesional, foco en impacto y próximos pasos.",
+    content: "Prioriza claridad, gancho inicial y lectura rápida en móvil.",
+    support: "Prioriza empatía, soluciones concretas y lenguaje sin fricción.",
+  };
+
+  var REFINEMENTS = {
+    shorter: "Reduce la extensión manteniendo el significado esencial.",
+    clearer: "Haz el texto más claro, simple y directo.",
+    professional: "Eleva el tono para un entorno profesional y ejecutivo.",
   };
 
   var STOPWORDS_ES = {
@@ -19,6 +44,26 @@
     entre: true, cuando: true, muy: true, sin: true, sobre: true, tambien: true, también: true,
   };
 
+  function safeGetJSON(key, fallback) {
+    try {
+      var raw = global.localStorage.getItem(key);
+      if (!raw) {
+        return fallback;
+      }
+      return JSON.parse(raw);
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function safeSetJSON(key, value) {
+    try {
+      global.localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      // Ignore storage write failures.
+    }
+  }
+
   function splitSentences(text) {
     return text
       .replace(/\s+/g, " ")
@@ -28,7 +73,7 @@
   }
 
   function countWords(text) {
-    var matches = text.trim().match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+/g);
+    var matches = (text || "").trim().match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+/g);
     return matches ? matches.length : 0;
   }
 
@@ -38,7 +83,7 @@
       return text.trim();
     }
     var keep = Math.max(1, Math.ceil(sentences.length * 0.35));
-    keep = Math.min(5, keep);
+    keep = Math.min(6, keep);
     return sentences.slice(0, keep).join(" ");
   }
 
@@ -53,6 +98,9 @@
       [/\brealizar\b/gi, "hacer"],
       [/\baproximadamente\b/gi, "casi"],
       [/\bactualmente\b/gi, "hoy"],
+      [/\bcon la finalidad de\b/gi, "para"],
+      [/\bdicho\b/gi, "ese"],
+      [/\bpor consiguiente\b/gi, "por eso"],
     ];
 
     var output = text;
@@ -63,10 +111,10 @@
     var sentences = splitSentences(output);
     var shortened = sentences.map(function (sentence) {
       var words = sentence.split(/\s+/);
-      if (words.length <= 24) {
+      if (words.length <= 22) {
         return sentence;
       }
-      return words.slice(0, 24).join(" ") + "…";
+      return words.slice(0, 22).join(" ") + "…";
     });
 
     return shortened.join(" ").trim();
@@ -87,6 +135,7 @@
       .replace(/\s+/g, " ")
       .replace(/\b(creo que|pienso que)\b/gi, "considero que")
       .replace(/\bok\b/gi, "de acuerdo")
+      .replace(/\bcosa\b/gi, "aspecto")
       .trim();
 
     if (!normalized) {
@@ -103,7 +152,6 @@
       if (!translated) {
         return word;
       }
-
       if (word[0] === word[0].toUpperCase()) {
         return translated.charAt(0).toUpperCase() + translated.slice(1);
       }
@@ -129,6 +177,8 @@
       mejorar: "improve",
       traduccion: "translation",
       traducción: "translation",
+      cliente: "client",
+      soporte: "support",
     };
     return replaceWords(text, dict);
   }
@@ -149,6 +199,8 @@
       result: "resultado",
       improve: "mejorar",
       translation: "traducción",
+      client: "cliente",
+      support: "soporte",
     };
     return replaceWords(text, dict);
   }
@@ -187,6 +239,55 @@
     ].join("\n");
   }
 
+  function buildEmail(text) {
+    var summary = summarize(text);
+    return [
+      "Asunto: Propuesta de siguiente paso",
+      "",
+      "Hola,",
+      "",
+      toProfessionalTone(summary),
+      "",
+      "Quedo atento para coordinar próximos pasos.",
+      "",
+      "Un saludo,",
+      "[Tu nombre]",
+    ].join("\n");
+  }
+
+  function buildLinkedInPost(text) {
+    var summary = summarize(text);
+    var keywords = topKeywords(text, 3);
+    var tags = keywords.map(function (item) { return "#" + item; }).join(" ");
+    return [
+      "Idea clave:",
+      summary,
+      "",
+      "¿Cómo lo estás abordando en tu equipo?",
+      "",
+      tags || "#productividad #comunicacion #ia",
+    ].join("\n");
+  }
+
+  function buildMeetingNotes(text) {
+    var lines = splitSentences(text);
+    var summary = lines.slice(0, 3).map(function (line) {
+      return "• " + line.trim();
+    }).join("\n");
+    return [
+      "Resumen de reunión",
+      "",
+      "Puntos principales:",
+      summary || "• Sin puntos detectados.",
+      "",
+      "Acuerdos:",
+      "• [Pendiente completar]",
+      "",
+      "Próximos pasos:",
+      "• [Responsable] [Fecha] [Acción]",
+    ].join("\n");
+  }
+
   function runAction(actionId, input) {
     var selected = actionId || "suggest";
     if (selected === "summary") {
@@ -207,7 +308,56 @@
     if (selected === "translate-es") {
       return translateToSpanish(input);
     }
+    if (selected === "email-pro") {
+      return buildEmail(input);
+    }
+    if (selected === "linkedin-post") {
+      return buildLinkedInPost(input);
+    }
+    if (selected === "meeting-notes") {
+      return buildMeetingNotes(input);
+    }
     return buildSuggestion(input);
+  }
+
+  function applyRefinementLocal(output, refinement) {
+    if (!refinement) {
+      return output;
+    }
+    if (refinement === "shorter") {
+      return summarize(output);
+    }
+    if (refinement === "clearer") {
+      return simplifySpanish(output);
+    }
+    if (refinement === "professional") {
+      return toProfessionalTone(output);
+    }
+    return output;
+  }
+
+  function estimateSentenceComplexity(text) {
+    var words = countWords(text);
+    var sentences = splitSentences(text).length || 1;
+    return Number((words / sentences).toFixed(1));
+  }
+
+  function buildQualityMetrics(input, output) {
+    var inputWords = countWords(input);
+    var outputWords = countWords(output);
+    var compression = 0;
+    if (inputWords > 0) {
+      compression = Math.round((1 - (outputWords / inputWords)) * 100);
+    }
+
+    return {
+      inputWords: inputWords,
+      outputWords: outputWords,
+      compressionPct: compression,
+      inputComplexity: estimateSentenceComplexity(input),
+      outputComplexity: estimateSentenceComplexity(output),
+      outputKeywords: topKeywords(output, 3),
+    };
   }
 
   function createTabController() {
@@ -253,6 +403,81 @@
     };
   }
 
+  function buildInstructions(actionId, profile, refinement) {
+    var actionLabel = ACTION_LABELS[actionId] || actionId;
+    var profileInstruction = PROFILE_INSTRUCTIONS[profile] || PROFILE_INSTRUCTIONS.general;
+    var parts = [
+      "Acción solicitada: " + actionLabel + ".",
+      "Perfil de uso: " + (PROFILE_LABELS[profile] || "General") + ".",
+      profileInstruction,
+      "Responde en español neutro, con alta claridad y sin relleno.",
+    ];
+
+    if (refinement && REFINEMENTS[refinement]) {
+      parts.push("Refinado adicional: " + REFINEMENTS[refinement]);
+    }
+
+    return parts.join(" ");
+  }
+
+  function buildSystemPrompt(actionId, profile, refinement) {
+    return [
+      "Eres un editor experto en comunicación escrita.",
+      "Prioriza precisión, utilidad práctica y legibilidad.",
+      buildInstructions(actionId, profile, refinement),
+      "No inventes datos. Si falta contexto, trabaja solo con el texto dado.",
+    ].join(" ");
+  }
+
+  function buildUserPrompt(input) {
+    return [
+      "Transforma el siguiente texto:",
+      "",
+      input,
+    ].join("\n");
+  }
+
+  function generateId() {
+    return "id-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  }
+
+  function formatDate(iso) {
+    var date = new Date(iso);
+    if (Number.isNaN(date.getTime())) {
+      return iso;
+    }
+    return date.toLocaleString("es-ES", {
+      dateStyle: "short",
+      timeStyle: "short",
+    });
+  }
+
+  function copyToClipboard(text) {
+    if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) {
+      return global.navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        var temp = document.createElement("textarea");
+        temp.value = text;
+        temp.setAttribute("readonly", "");
+        temp.style.position = "absolute";
+        temp.style.left = "-9999px";
+        document.body.appendChild(temp);
+        temp.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(temp);
+        if (!ok) {
+          reject(new Error("No se pudo copiar."));
+          return;
+        }
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
   function initMain() {
     var input = document.getElementById("input");
     var trigger = document.getElementById("btn-suggest");
@@ -260,8 +485,17 @@
     var panelRes = document.getElementById("tab-res");
     var panelJson = document.getElementById("tab-json");
     var panelRaw = document.getElementById("tab-raw");
+    var engineMode = document.getElementById("engine-mode");
+    var profileMode = document.getElementById("intent-profile");
+    var engineHint = document.getElementById("engine-hint");
+    var statusLine = document.getElementById("status-line");
+    var qualityBadges = document.getElementById("quality-badges");
+    var copyButton = document.getElementById("btn-copy");
+    var refineButtons = Array.prototype.slice.call(document.querySelectorAll(".refine-btn"));
+    var historyList = document.getElementById("history-list");
+    var historyEmpty = document.getElementById("history-empty");
 
-    if (!input || !trigger || !panelRes || !panelJson || !panelRaw || !loading) {
+    if (!input || !trigger || !loading || !panelRes || !panelJson || !panelRaw) {
       return;
     }
 
@@ -271,64 +505,396 @@
     app.ui.selectTab = tabs.selectTab;
     global.SimplifyApp = app;
 
+    var config = global.SIMPLIFY_PAY_CONFIG || {};
+    var storage = config.storage || {};
+    var historyKey = storage.history || "simplify.history.v1";
+    var prefsKey = storage.prefs || "simplify.prefs.v1";
+    var historyLimit = 10;
+
+    var storedHistory = safeGetJSON(historyKey, []);
+    var state = {
+      busy: false,
+      last: null,
+      history: Array.isArray(storedHistory) ? storedHistory : [],
+    };
+
+    function getMode() {
+      return engineMode ? engineMode.value : "auto";
+    }
+
+    function getProfile() {
+      return profileMode ? profileMode.value : "general";
+    }
+
+    function setLoadingState(isLoading) {
+      state.busy = isLoading;
+      loading.hidden = !isLoading;
+      trigger.disabled = isLoading;
+      if (copyButton) {
+        copyButton.disabled = isLoading;
+      }
+      refineButtons.forEach(function (button) {
+        button.disabled = isLoading;
+      });
+    }
+
+    function renderQuality(quality) {
+      if (!qualityBadges || !quality) {
+        return;
+      }
+      qualityBadges.innerHTML = "";
+
+      var items = [
+        "Palabras: " + quality.inputWords + " → " + quality.outputWords,
+        "Compresión: " + quality.compressionPct + "%",
+        "Complejidad media: " + quality.inputComplexity + " → " + quality.outputComplexity,
+      ];
+
+      if (Array.isArray(quality.outputKeywords) && quality.outputKeywords.length > 0) {
+        items.push("Claves: " + quality.outputKeywords.join(", "));
+      }
+
+      items.forEach(function (text) {
+        var badge = document.createElement("span");
+        badge.className = "quality-badge";
+        badge.textContent = text;
+        qualityBadges.appendChild(badge);
+      });
+    }
+
     function render(payload) {
       panelRes.textContent = payload.output;
       panelJson.textContent = JSON.stringify(payload, null, 2);
       panelRaw.textContent = payload.input;
       tabs.selectTab("tab-res");
+      renderQuality(payload.quality);
+      if (statusLine) {
+        var status = "Motor: " + (payload.engineLabel || "local");
+        if (payload.fallbackReason) {
+          status += " · Fallback local: " + payload.fallbackReason;
+        }
+        statusLine.textContent = status;
+      }
+      if (copyButton) {
+        copyButton.disabled = !payload.output;
+      }
     }
 
-    function setLoadingState(isLoading) {
-      loading.hidden = !isLoading;
-      trigger.disabled = isLoading;
+    function saveHistory() {
+      safeSetJSON(historyKey, state.history);
     }
 
-    trigger.addEventListener("click", function () {
-      var text = input.value.trim();
+    function pushHistory(payload) {
+      var entry = {
+        id: payload.id,
+        action: payload.action,
+        actionLabel: payload.actionLabel,
+        profile: payload.profile,
+        profileLabel: payload.profileLabel,
+        engineLabel: payload.engineLabel || "local",
+        generatedAt: payload.generatedAt,
+        input: payload.input,
+        output: payload.output,
+        quality: payload.quality,
+      };
+      state.history = [entry].concat(state.history.filter(function (item) {
+        return item.id !== entry.id;
+      })).slice(0, historyLimit);
+      saveHistory();
+      renderHistory();
+    }
+
+    function restoreFromHistory(entry) {
+      if (!entry) {
+        return;
+      }
+      input.value = entry.input || "";
+      state.last = entry;
+      render(entry);
+    }
+
+    function renderHistory() {
+      if (!historyList || !historyEmpty) {
+        return;
+      }
+
+      historyList.innerHTML = "";
+      if (!state.history.length) {
+        historyEmpty.hidden = false;
+        return;
+      }
+      historyEmpty.hidden = true;
+
+      state.history.forEach(function (entry) {
+        var item = document.createElement("li");
+        item.className = "history-item";
+
+        var button = document.createElement("button");
+        button.type = "button";
+        button.addEventListener("click", function () {
+          restoreFromHistory(entry);
+        });
+
+        var title = document.createElement("strong");
+        title.textContent = entry.actionLabel + " · " + entry.profileLabel;
+        var excerpt = document.createElement("small");
+        excerpt.textContent = (entry.output || "").slice(0, 160) + ((entry.output || "").length > 160 ? "…" : "");
+        var meta = document.createElement("small");
+        meta.textContent = formatDate(entry.generatedAt) + " · " + entry.engineLabel;
+
+        button.appendChild(title);
+        button.appendChild(excerpt);
+        button.appendChild(meta);
+        item.appendChild(button);
+        historyList.appendChild(item);
+      });
+    }
+
+    function savePrefs() {
+      safeSetJSON(prefsKey, {
+        mode: getMode(),
+        profile: getProfile(),
+      });
+    }
+
+    function loadPrefs() {
+      var prefs = safeGetJSON(prefsKey, {});
+      if (engineMode && typeof prefs.mode === "string") {
+        engineMode.value = prefs.mode;
+      }
+      if (profileMode && typeof prefs.profile === "string") {
+        profileMode.value = prefs.profile;
+      }
+    }
+
+    function updateEngineHint() {
+      if (!engineHint) {
+        return;
+      }
+      var backend = global.SimplifyAIClient && global.SimplifyAIClient.getBackendConfig
+        ? global.SimplifyAIClient.getBackendConfig()
+        : { endpoint: "" };
+      var hasEndpoint = Boolean(backend.endpoint);
+      if (getMode() === "local") {
+        engineHint.textContent = "Modo local activo: velocidad máxima, sin dependencia de API.";
+        return;
+      }
+      if (getMode() === "remote") {
+        engineHint.textContent = hasEndpoint
+          ? "Modo remoto activo: usará la API configurada."
+          : "Modo remoto sin endpoint: usará fallback local hasta configurar backend.";
+        return;
+      }
+      engineHint.textContent = hasEndpoint
+        ? "Auto: intentará API remota y hará fallback local si falla."
+        : "Auto: no hay endpoint configurado, se usará motor local.";
+    }
+
+    function runLocal(request) {
+      var base = runAction(request.action, request.input);
+      var output = applyRefinementLocal(base, request.refinement);
+      return Promise.resolve({
+        output: output,
+        engine: "local-fallback",
+        model: "local-rule-engine",
+      });
+    }
+
+    function runHybrid(request, mode) {
+      var client = global.SimplifyAIClient;
+      if (!client || !client.canUseRemote(mode)) {
+        if (mode === "remote") {
+          return runLocal(request).then(function (result) {
+            result.fallbackError = "Endpoint remoto no configurado";
+            return result;
+          });
+        }
+        return runLocal(request);
+      }
+
+      return client.requestRemote(request, mode).catch(function (error) {
+        return runLocal(request).then(function (localResult) {
+          localResult.fallbackError = error && error.message ? error.message : "Error remoto";
+          return localResult;
+        });
+      });
+    }
+
+    function buildRequest(options) {
+      var instructions = buildInstructions(options.action, options.profile, options.refinement);
+      return {
+        input: options.input,
+        action: options.action,
+        profile: options.profile,
+        refinement: options.refinement || "",
+        locale: "es-ES",
+        instructions: instructions,
+        systemPrompt: buildSystemPrompt(options.action, options.profile, options.refinement),
+        userPrompt: buildUserPrompt(options.input),
+        metadata: {
+          source: options.source || "user",
+          appVersion: "2026.02",
+        },
+      };
+    }
+
+    function engineLabelFromResult(result) {
+      if (!result || !result.engine) {
+        return "desconocido";
+      }
+      if (result.engine === "remote") {
+        return "remoto (" + (result.model || "modelo") + ")";
+      }
+      return "local";
+    }
+
+    function execute(options) {
+      var text = (options.input || "").trim();
       if (!text) {
         panelRes.textContent = "Pega un texto para poder generar una salida.";
         tabs.selectTab("tab-res");
         return;
       }
 
-      var selectedAction = trigger.getAttribute("data-action") || "suggest";
       var guard = global.SimplifyPayGuard;
-      if (guard && !guard.canUse()) {
+      if (options.consumeCredit && guard && !guard.canUse()) {
         panelRes.textContent = "Te quedaste sin usos gratis. Puedes activar créditos para continuar.";
         tabs.selectTab("tab-res");
         return;
       }
 
       setLoadingState(true);
+      var mode = getMode();
+      var profile = getProfile();
+      var request = buildRequest({
+        input: text,
+        action: options.action,
+        profile: profile,
+        refinement: options.refinement,
+        source: options.source,
+      });
 
-      global.setTimeout(function () {
-        try {
-          var output = runAction(selectedAction, text);
-          if (guard) {
-            guard.consumeUse();
-          }
-
-          var payload = {
-            action: selectedAction,
-            actionLabel: ACTION_LABELS[selectedAction] || selectedAction,
-            generatedAt: new Date().toISOString(),
-            engine: "local-fallback",
-            inputWordCount: countWords(text),
-            outputWordCount: countWords(output),
-            input: text,
-            output: output,
-          };
-
-          render(payload);
-        } catch (error) {
-          panelRes.textContent = "No se pudo procesar el texto. Inténtalo de nuevo.";
-          console.error("[Simplify] Error procesando texto", error);
-          tabs.selectTab("tab-res");
-        } finally {
-          setLoadingState(false);
+      runHybrid(request, mode).then(function (result) {
+        if (options.consumeCredit && guard) {
+          guard.consumeUse();
         }
-      }, 220);
+
+        var output = (result.output || "").trim();
+        if (!output) {
+          output = "No se pudo generar una salida útil con el contenido recibido.";
+        }
+
+        var payload = {
+          id: generateId(),
+          action: options.action,
+          actionLabel: ACTION_LABELS[options.action] || options.action,
+          profile: profile,
+          profileLabel: PROFILE_LABELS[profile] || "General",
+          refinement: options.refinement || "",
+          refinementInstruction: options.refinement ? REFINEMENTS[options.refinement] : "",
+          generatedAt: new Date().toISOString(),
+          modeSelected: mode,
+          engine: result.engine || "local-fallback",
+          engineLabel: engineLabelFromResult(result),
+          model: result.model || "",
+          fallbackReason: result.fallbackError || "",
+          inputWordCount: countWords(text),
+          outputWordCount: countWords(output),
+          instructions: request.instructions,
+          input: text,
+          output: output,
+          quality: buildQualityMetrics(text, output),
+          remoteRaw: result.raw || null,
+        };
+
+        state.last = payload;
+        pushHistory(payload);
+        render(payload);
+      }).catch(function (error) {
+        panelRes.textContent = "No se pudo procesar el texto. Inténtalo de nuevo.";
+        if (statusLine) {
+          statusLine.textContent = "Error: " + (error && error.message ? error.message : "fallo inesperado");
+        }
+        tabs.selectTab("tab-res");
+      }).finally(function () {
+        setLoadingState(false);
+      });
+    }
+
+    function runPrimaryAction() {
+      var selectedAction = trigger.getAttribute("data-action") || "suggest";
+      execute({
+        input: input.value,
+        action: selectedAction,
+        source: "primary",
+        consumeCredit: true,
+      });
+    }
+
+    trigger.addEventListener("click", runPrimaryAction);
+
+    input.addEventListener("keydown", function (event) {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        runPrimaryAction();
+      }
     });
+
+    refineButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (!state.last || !state.last.output) {
+          if (statusLine) {
+            statusLine.textContent = "Genera primero un resultado para poder refinarlo.";
+          }
+          return;
+        }
+
+        execute({
+          input: state.last.output,
+          action: state.last.action || "suggest",
+          refinement: button.getAttribute("data-refine") || "",
+          source: "refine",
+          consumeCredit: false,
+        });
+      });
+    });
+
+    if (copyButton) {
+      copyButton.disabled = true;
+      copyButton.addEventListener("click", function () {
+        if (!state.last || !state.last.output) {
+          return;
+        }
+        copyToClipboard(state.last.output).then(function () {
+          if (statusLine) {
+            statusLine.textContent = "Resultado copiado al portapapeles.";
+          }
+        }).catch(function () {
+          if (statusLine) {
+            statusLine.textContent = "No se pudo copiar automáticamente. Copia manualmente.";
+          }
+        });
+      });
+    }
+
+    if (engineMode) {
+      engineMode.addEventListener("change", function () {
+        savePrefs();
+        updateEngineHint();
+      });
+    }
+    if (profileMode) {
+      profileMode.addEventListener("change", function () {
+        savePrefs();
+      });
+    }
+
+    loadPrefs();
+    updateEngineHint();
+    renderHistory();
+    if (state.history.length > 0) {
+      restoreFromHistory(state.history[0]);
+    }
   }
 
   if (global.SimplifyApp && typeof global.SimplifyApp.registerInit === "function") {

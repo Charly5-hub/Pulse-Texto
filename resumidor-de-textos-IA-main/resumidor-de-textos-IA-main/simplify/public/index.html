@@ -34,6 +34,29 @@
     <section class="card" aria-labelledby="input-title">
       <h2 id="input-title" class="sr-only">Entrada</h2>
       <textarea id="input" rows="10" placeholder="Pega tu texto aquí…"></textarea>
+      <div class="smart-controls" aria-label="Configuración IA">
+        <label class="field-inline" for="engine-mode">
+          Modo IA
+          <select id="engine-mode">
+            <option value="auto" selected>Auto (recomendado)</option>
+            <option value="remote">Remoto (API)</option>
+            <option value="local">Local (fallback)</option>
+          </select>
+        </label>
+        <label class="field-inline" for="intent-profile">
+          Contexto
+          <select id="intent-profile">
+            <option value="general" selected>General</option>
+            <option value="study">Estudio</option>
+            <option value="business">Trabajo/Negocio</option>
+            <option value="content">Contenido y RRSS</option>
+            <option value="support">Soporte/Cliente</option>
+          </select>
+        </label>
+      </div>
+      <p id="engine-hint" class="subtle">
+        Auto usa API remota si está configurada; si no, aplica motor local.
+      </p>
       <div class="actions">
         <button id="btn-suggest" class="btn primary" type="button" data-action="suggest">Sugerencia</button>
       </div>
@@ -65,10 +88,25 @@
       </div>
 
       <div id="loading" hidden>Generando…</div>
+      <div id="status-line" class="subtle" role="status" aria-live="polite"></div>
 
       <pre id="tab-res"  role="tabpanel" tabindex="0"  aria-labelledby="tabbtn-res"  class="panel"></pre>
       <pre id="tab-json" role="tabpanel" tabindex="-1" aria-labelledby="tabbtn-json" class="panel" hidden></pre>
       <pre id="tab-raw"  role="tabpanel" tabindex="-1" aria-labelledby="tabbtn-raw"  class="panel" hidden></pre>
+
+      <div class="result-actions" aria-label="Acciones sobre resultado">
+        <button id="btn-copy" class="btn outline" type="button">Copiar resultado</button>
+        <button class="chip-btn refine-btn" data-refine="shorter" type="button">Más corto</button>
+        <button class="chip-btn refine-btn" data-refine="clearer" type="button">Más claro</button>
+        <button class="chip-btn refine-btn" data-refine="professional" type="button">Más profesional</button>
+      </div>
+      <div id="quality-badges" class="quality-badges" aria-live="polite"></div>
+    </section>
+
+    <section class="card" aria-labelledby="history-title">
+      <h3 id="history-title">Historial reciente</h3>
+      <p id="history-empty" class="subtle">Todavía no hay resultados guardados.</p>
+      <ul id="history-list" class="history-list"></ul>
     </section>
   </main>
 
@@ -77,6 +115,7 @@
   <script src="./pay.guard.js?v=1758634303801"  defer></script>
   <script src="./chips.js?v=1758634303801"      defer></script>
   <script src="./pay.ui.js?v=1758634303801"     defer></script>
+  <script src="./ai.client.js?v=1758634303801"  defer></script>
   <script src="./main.js?v=1758634303801"       defer></script>
   <script defer src="./js/sky.js"></script>
 </div><!--page-wrap-->

@@ -48,10 +48,16 @@
       usage: "simplify.usage.v1",
       paidCredits: "simplify.paidCredits.v1",
       adminBypass: "simplify.adminBypass.v1",
+      history: "simplify.history.v1",
+      prefs: "simplify.prefs.v1",
     },
     backend: {
       endpoint: "",
       timeoutMs: 10000,
+      model: "",
+      mode: "generic",
+      temperature: 0.2,
+      headers: {},
     },
   };
 

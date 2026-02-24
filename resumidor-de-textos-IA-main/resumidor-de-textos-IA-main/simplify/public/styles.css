@@ -13,6 +13,9 @@ h1{font-size:36px;margin:0 0 4px}
 textarea{width:100%;border:1px solid var(--border);border-radius:12px;padding:12px 14px;font:400 16px/1.5 inherit;min-height:180px}
 textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .actions{display:flex;gap:10px;margin-top:12px;justify-content:center}
+.smart-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:12px}
+.field-inline{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:13px;font-weight:600}
+.field-inline select{border:1px solid var(--border);border-radius:10px;padding:.5rem .6rem;background:#fff;color:#0f172a;font:500 14px/1.2 inherit}
 .btn{display:inline-flex;align-items:center;gap:.5rem;border-radius:999px;padding:.6rem 1rem;border:1px solid transparent;cursor:pointer;font-weight:600;font-size:14px;transition:transform .08s,box-shadow .08s,background .2s}
 .btn.primary{color:#fff;background:var(--pulse);border-color:var(--pulse)}
 .btn.primary:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(37,99,235,.35)}
@@ -38,6 +41,15 @@ textarea:focus{outline:3px solid var(--ring);outline-offset:2px}
 .tab[aria-selected="true"]{background:var(--pulse);border-color:var(--pulse);color:#fff}
 .panel{white-space:pre-wrap;background:#f8fafc;border:1px dashed #c7d2fe;border-radius:12px;padding:12px;min-height:120px}
 #loading{background:#eef2ff;border:1px dashed #c7d2fe;border-radius:12px;padding:8px 12px;margin-bottom:8px}
+.result-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.result-actions .refine-btn{background:rgba(255,255,255,.92)}
+.quality-badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.quality-badge{border:1px solid rgba(147,197,253,.7);background:rgba(37,99,235,.12);color:#1e3a8a;border-radius:999px;padding:.32rem .6rem;font:600 12px/1.1 system-ui}
+.history-list{list-style:none;padding:0;margin:0;display:grid;gap:10px}
+.history-item{border:1px solid rgba(229,231,235,.75);border-radius:12px;background:rgba(255,255,255,.96);padding:10px 12px}
+.history-item button{width:100%;text-align:left;background:transparent;border:0;color:#0f172a;cursor:pointer;padding:0;font:inherit}
+.history-item strong{display:block;font-size:13px}
+.history-item small{display:block;color:#6b7280;margin-top:4px}
 [hidden]{display:none !important}
 
 /* SKY THEME */
