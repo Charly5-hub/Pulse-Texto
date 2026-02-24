@@ -71,6 +71,7 @@
       consumePath: "/api/pay/consume",
       adminMetricsPath: "/api/admin/metrics",
       adminReconcilePath: "/api/admin/reconcile/payments",
+      adminGrantPath: "/api/admin/credits/grant",
       oneCredits: 1,
       packCredits: 10,
       subCreditsPerCycle: 250,

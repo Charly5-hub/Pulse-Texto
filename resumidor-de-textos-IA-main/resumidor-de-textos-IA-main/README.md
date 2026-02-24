@@ -23,12 +23,17 @@ Aplicación de transformación de texto con enfoque productivo (2026): UX rápid
 ```text
 .
 ├── README.md
+├── docker-compose.yml
+├── .env.compose.example
 ├── scripts/
 │   └── validate_static.py
 ├── backend/
+│   ├── Dockerfile
 │   ├── server.js
 │   ├── package.json
-│   └── .env.example
+│   ├── .env.example
+│   ├── tests/
+│   └── sql/
 └── simplify/
     └── public/
         ├── index.html
@@ -75,6 +80,21 @@ python3 -m http.server 4173
 ```
 
 App: `http://localhost:4173`
+
+### Opción rápida con Docker Compose
+
+Desde la raíz del repo:
+
+```bash
+cp .env.compose.example .env.compose
+docker compose --env-file .env.compose up --build
+```
+
+Servicios:
+- Frontend: `http://localhost:4173`
+- Backend: `http://localhost:8787`
+- Postgres: `localhost:5432`
+- Backups automáticos de Postgres en volumen `pg_backups`
 
 ## Variables de entorno (`backend/.env`)
 
@@ -127,6 +147,7 @@ Opcionales importantes:
 ### Admin
 - `GET /api/admin/metrics`
 - `POST /api/admin/reconcile/payments`
+- `POST /api/admin/credits/grant`
 
 ## Webhook Stripe en local
 
@@ -142,9 +163,35 @@ Copia el `whsec_...` en `STRIPE_WEBHOOK_SECRET`.
 python3 scripts/validate_static.py
 ```
 
+## Tests E2E backend
+
+El backend incluye suite E2E con `pg-mem` (sin Postgres real) y mock de proveedor IA:
+
+```bash
+cd backend
+npm test
+```
+
+Cobertura actual del flujo:
+- sesión anónima + login email OTP,
+- consumo de cuota en generación IA,
+- acreditación admin y consumo de créditos,
+- métricas admin.
+
+## SQL útil (seed + BI)
+
+```bash
+# Seed demo opcional
+psql "$DATABASE_URL" -f backend/sql/seed_demo.sql
+
+# Queries de dashboard
+psql "$DATABASE_URL" -f backend/sql/dashboard_queries.sql
+```
+
 ## Notas de seguridad
 
 - Claves de IA y Stripe se mantienen en backend.
 - Webhook Stripe es idempotente por `event_id` en DB.
 - El consumo de cuota para IA se valida server-side (free uses + créditos).
 - Admin protegido por `x-admin-key` o rol `admin` en JWT.
+- Rate limiting anti-abuso por IP/usuario en auth, IA, eventos, checkout y admin.

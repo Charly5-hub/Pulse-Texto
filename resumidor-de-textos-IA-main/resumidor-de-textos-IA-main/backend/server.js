@@ -18,6 +18,7 @@ const CONFIG = {
     .map(function mapOrigin(item) { return item.trim(); })
     .filter(Boolean),
   databaseURL: String(process.env.DATABASE_URL || "").trim(),
+  usePgMem: String(process.env.USE_PG_MEM || "").trim() === "1",
   postgresSSL: String(process.env.POSTGRES_SSL || "false").trim() === "true",
   openaiBase: String(process.env.OPENAI_API_BASE || "https://api.openai.com/v1").trim(),
   openaiKey: String(process.env.OPENAI_API_KEY || "").trim(),
@@ -48,15 +49,9 @@ const CONFIG = {
   smtpFrom: String(process.env.SMTP_FROM || "noreply@simplify.local").trim(),
 };
 
-if (!CONFIG.databaseURL) {
-  console.error("[fatal] DATABASE_URL is required.");
-  process.exit(1);
-}
-
-const pool = new Pool({
-  connectionString: CONFIG.databaseURL,
-  ssl: CONFIG.postgresSSL ? { rejectUnauthorized: false } : false,
-});
+const dbRuntime = createDatabaseRuntime();
+const pool = dbRuntime.pool;
+const DB_PROVIDER = dbRuntime.provider;
 
 const stripe = CONFIG.stripeKey ? new Stripe(CONFIG.stripeKey) : null;
 
@@ -90,6 +85,99 @@ const PLAN_CONFIG = {
 };
 
 const ALLOW_ANY_ORIGIN = CONFIG.frontendOrigins.includes("*");
+const RATE_LIMITERS = {
+  globalApi: createRateLimiter({
+    name: "global-api",
+    windowMs: 5 * 60 * 1000,
+    max: 400,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  authAnonymous: createRateLimiter({
+    name: "auth-anonymous",
+    windowMs: 10 * 60 * 1000,
+    max: 40,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  authRequestCode: createRateLimiter({
+    name: "auth-request-code",
+    windowMs: 15 * 60 * 1000,
+    max: 8,
+    keyFn: function key(req) {
+      return getClientKey(req) + ":" + normalizeEmail(req.body && req.body.email);
+    },
+  }),
+  authVerifyCode: createRateLimiter({
+    name: "auth-verify-code",
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    keyFn: function key(req) {
+      return getClientKey(req) + ":" + normalizeEmail(req.body && req.body.email);
+    },
+  }),
+  authGoogle: createRateLimiter({
+    name: "auth-google",
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  checkout: createRateLimiter({
+    name: "checkout",
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    keyFn: function key(req) {
+      return getClientKey(req) + ":" + normalizeCustomerId(req.body && req.body.customerId);
+    },
+  }),
+  payConsume: createRateLimiter({
+    name: "pay-consume",
+    windowMs: 2 * 60 * 1000,
+    max: 60,
+    keyFn: function key(req) {
+      return getClientKey(req) + ":" + normalizeCustomerId(req.body && req.body.customerId);
+    },
+  }),
+  eventsTrack: createRateLimiter({
+    name: "events-track",
+    windowMs: 60 * 1000,
+    max: 180,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  aiGenerate: createRateLimiter({
+    name: "ai-generate",
+    windowMs: 60 * 1000,
+    max: 80,
+    keyFn: function key(req) {
+      var customerFromBody = normalizeCustomerId(req.body && req.body.customerId);
+      var customerFromMeta = normalizeCustomerId(req.body && req.body.metadata && req.body.metadata.customerId);
+      var stable = customerFromMeta || customerFromBody;
+      return getClientKey(req) + ":" + stable;
+    },
+  }),
+  adminRead: createRateLimiter({
+    name: "admin-read",
+    windowMs: 60 * 1000,
+    max: 60,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  adminWrite: createRateLimiter({
+    name: "admin-write",
+    windowMs: 60 * 1000,
+    max: 30,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+};
 
 app.use(cors({
   origin: function originValidator(origin, callback) {
@@ -155,13 +243,14 @@ app.post("/api/pay/webhook", express.raw({ type: "application/json" }), async fu
 
 app.use(express.json({ limit: "1mb" }));
 app.use(authOptional);
+app.use(RATE_LIMITERS.globalApi);
 
 app.get("/api/health", async function healthHandler(_req, res) {
   try {
     await pool.query("SELECT 1");
     res.json({
       ok: true,
-      db: "postgres",
+      db: DB_PROVIDER,
       stripeConfigured: Boolean(stripe),
       webhookConfigured: Boolean(CONFIG.stripeWebhookSecret),
       aiConfigured: Boolean(CONFIG.openaiKey),
@@ -177,7 +266,7 @@ app.get("/api/health", async function healthHandler(_req, res) {
   }
 });
 
-app.post("/api/auth/session/anonymous", async function createAnonymousSession(req, res) {
+app.post("/api/auth/session/anonymous", RATE_LIMITERS.authAnonymous, async function createAnonymousSession(req, res) {
   const incomingCustomerId = normalizeCustomerId(req.body && req.body.customerId);
   const customerId = incomingCustomerId || generateCustomerId();
 
@@ -199,7 +288,7 @@ app.get("/api/auth/me", requireAuth, function authMe(req, res) {
   });
 });
 
-app.post("/api/auth/email/request-code", async function requestEmailCode(req, res) {
+app.post("/api/auth/email/request-code", RATE_LIMITERS.authRequestCode, async function requestEmailCode(req, res) {
   const email = normalizeEmail(req.body && req.body.email);
   const incomingCustomerId = normalizeCustomerId(req.body && req.body.customerId);
   const customerId = incomingCustomerId || generateCustomerId();
@@ -242,7 +331,7 @@ app.post("/api/auth/email/request-code", async function requestEmailCode(req, re
   }
 });
 
-app.post("/api/auth/email/verify-code", async function verifyEmailCode(req, res) {
+app.post("/api/auth/email/verify-code", RATE_LIMITERS.authVerifyCode, async function verifyEmailCode(req, res) {
   const email = normalizeEmail(req.body && req.body.email);
   const code = String(req.body && req.body.code || "").trim();
   const incomingCustomerId = normalizeCustomerId(req.body && req.body.customerId);
@@ -307,7 +396,7 @@ app.post("/api/auth/email/verify-code", async function verifyEmailCode(req, res)
   }
 });
 
-app.post("/api/auth/google", async function googleAuth(req, res) {
+app.post("/api/auth/google", RATE_LIMITERS.authGoogle, async function googleAuth(req, res) {
   if (!CONFIG.googleClientId) {
     res.status(503).json({ error: "Google Auth no configurado. Falta GOOGLE_CLIENT_ID." });
     return;
@@ -384,7 +473,7 @@ app.get("/api/pay/plans", function getPlans(_req, res) {
   });
 });
 
-app.post("/api/pay/checkout", async function createCheckout(req, res) {
+app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheckout(req, res) {
   if (!stripe) {
     res.status(503).json({ error: "Stripe no está configurado todavía." });
     return;
@@ -476,7 +565,7 @@ app.get("/api/pay/balance", async function getBalance(req, res) {
   }
 });
 
-app.post("/api/pay/consume", async function consumeCredits(req, res) {
+app.post("/api/pay/consume", RATE_LIMITERS.payConsume, async function consumeCredits(req, res) {
   const units = toPositiveInt(req.body && req.body.units, 1);
   if (units < 1 || units > 50) {
     res.status(400).json({ error: "units debe ser un entero entre 1 y 50." });
@@ -519,12 +608,17 @@ app.post("/api/pay/consume", async function consumeCredits(req, res) {
   }
 });
 
-app.post("/api/events/track", async function trackEvent(req, res) {
+app.post("/api/events/track", RATE_LIMITERS.eventsTrack, async function trackEvent(req, res) {
   const eventName = String(req.body && req.body.eventName || "").trim();
   const payload = req.body && typeof req.body.payload === "object" && req.body.payload ? req.body.payload : {};
 
   if (!eventName) {
     res.status(400).json({ error: "eventName es obligatorio." });
+    return;
+  }
+  const payloadBytes = Buffer.byteLength(JSON.stringify(payload || {}), "utf8");
+  if (payloadBytes > 16 * 1024) {
+    res.status(413).json({ error: "payload demasiado grande para tracking." });
     return;
   }
 
@@ -540,7 +634,7 @@ app.post("/api/events/track", async function trackEvent(req, res) {
   }
 });
 
-app.post("/api/ai/generate", async function generateWithAI(req, res) {
+app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWithAI(req, res) {
   if (!CONFIG.openaiKey) {
     res.status(503).json({ error: "OPENAI_API_KEY no configurada en servidor." });
     return;
@@ -558,6 +652,14 @@ app.post("/api/ai/generate", async function generateWithAI(req, res) {
 
   if (!input) {
     res.status(400).json({ error: "input es obligatorio." });
+    return;
+  }
+  if (input.length > 32000) {
+    res.status(413).json({ error: "input excede límite de 32000 caracteres." });
+    return;
+  }
+  if (userPrompt.length > 40000) {
+    res.status(413).json({ error: "prompt excede límite permitido." });
     return;
   }
 
@@ -645,7 +747,7 @@ app.post("/api/ai/generate", async function generateWithAI(req, res) {
   }
 });
 
-app.get("/api/admin/metrics", requireAdmin, async function adminMetrics(req, res) {
+app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async function adminMetrics(req, res) {
   const days = Math.max(1, Math.min(365, toPositiveInt(req.query && req.query.days, 30)));
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
@@ -668,6 +770,14 @@ app.get("/api/admin/metrics", requireAdmin, async function adminMetrics(req, res
         "SELECT COALESCE(payload->>'action','unknown') AS action, COUNT(*)::int AS total FROM app_events WHERE event_name = 'generation_completed' AND created_at >= $1 GROUP BY action ORDER BY total DESC LIMIT 10",
         [since.toISOString()]
       );
+      const dailyEvents = await client.query(
+        "SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'YYYY-MM-DD') AS day, event_name, COUNT(*)::int AS total FROM app_events WHERE created_at >= $1 GROUP BY day, event_name ORDER BY day ASC, event_name ASC",
+        [since.toISOString()]
+      );
+      const dailyRevenue = await client.query(
+        "SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'YYYY-MM-DD') AS day, COALESCE(SUM(amount_total),0)::bigint AS revenue_cents, COUNT(*)::int AS payments FROM payment_sessions WHERE status = 'completed' AND created_at >= $1 GROUP BY day ORDER BY day ASC",
+        [since.toISOString()]
+      );
 
       return {
         users: userStats.rows[0],
@@ -675,6 +785,8 @@ app.get("/api/admin/metrics", requireAdmin, async function adminMetrics(req, res
         revenue: revenueStats.rows[0],
         events: eventsStats.rows,
         topActions: actionStats.rows,
+        dailyEvents: dailyEvents.rows,
+        dailyRevenue: dailyRevenue.rows,
       };
     });
 
@@ -711,13 +823,62 @@ app.get("/api/admin/metrics", requireAdmin, async function adminMetrics(req, res
       },
       events: summary.events,
       topActions: summary.topActions,
+      dailyEvents: summary.dailyEvents,
+      dailyRevenue: summary.dailyRevenue,
     });
   } catch (error) {
     res.status(500).json({ error: "No se pudieron obtener métricas.", detail: String(error && error.message || error) });
   }
 });
 
-app.post("/api/admin/reconcile/payments", requireAdmin, async function reconcilePayments(req, res) {
+app.post("/api/admin/credits/grant", requireAdmin, RATE_LIMITERS.adminWrite, async function grantCredits(req, res) {
+  const requestedCredits = toPositiveInt(req.body && req.body.credits, 0);
+  if (requestedCredits <= 0 || requestedCredits > 100000) {
+    res.status(400).json({ error: "credits debe estar entre 1 y 100000." });
+    return;
+  }
+
+  try {
+    const user = await withTransaction(async function tx(client) {
+      var target = null;
+      const targetUserId = String(req.body && req.body.userId || "").trim();
+      const targetCustomerId = normalizeCustomerId(req.body && req.body.customerId);
+
+      if (targetUserId) {
+        target = await getUserById(client, targetUserId);
+      }
+      if (!target && targetCustomerId) {
+        target = await getUserByCustomerId(client, targetCustomerId);
+      }
+      if (!target && targetCustomerId) {
+        target = await ensureUserByCustomerId(client, targetCustomerId);
+      }
+      if (!target) {
+        throw createError("No se encontró usuario objetivo para acreditar.", 404);
+      }
+
+      await client.query(
+        "UPDATE user_credits SET credits = credits + $2, total_purchased = total_purchased + $2, updated_at = NOW() WHERE user_id = $1",
+        [target.id, requestedCredits]
+      );
+      await recordEvent(client, "admin_credits_granted", target.id, target.customer_id, {
+        credits: requestedCredits,
+      });
+      return getUserById(client, target.id);
+    });
+
+    res.json({
+      ok: true,
+      granted: requestedCredits,
+      user: publicUser(user),
+    });
+  } catch (error) {
+    const status = Number(error && error.statusCode) || 500;
+    res.status(status).json({ error: String(error && error.message || "No se pudieron acreditar créditos.") });
+  }
+});
+
+app.post("/api/admin/reconcile/payments", requireAdmin, RATE_LIMITERS.adminWrite, async function reconcilePayments(req, res) {
   if (!stripe) {
     res.status(503).json({ error: "Stripe no configurado." });
     return;
@@ -778,16 +939,71 @@ app.use(function errorHandler(err, _req, res, _next) {
   res.status(500).json({ error: "Error interno.", detail: String(err && err.message || err) });
 });
 
-bootstrap().catch(function fatal(error) {
-  console.error("[fatal] startup error", error);
-  process.exit(1);
-});
+let serverInstance = null;
+let hasMigrated = false;
+let poolClosed = false;
 
-async function bootstrap() {
-  await runMigrations();
-  app.listen(CONFIG.port, function onListen() {
-    console.log("[simplify-backend] listening on port " + CONFIG.port);
+async function startServer(options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const port = Number.isFinite(Number(opts.port)) ? Number(opts.port) : CONFIG.port;
+  const host = typeof opts.host === "string" && opts.host ? opts.host : "0.0.0.0";
+
+  if (serverInstance) {
+    const address = serverInstance.address();
+    return {
+      app: app,
+      server: serverInstance,
+      port: address && address.port ? address.port : port,
+      host: host,
+      provider: DB_PROVIDER,
+    };
+  }
+  if (poolClosed) {
+    throw new Error("Pool ya fue cerrado; reinicia el proceso para volver a arrancar.");
+  }
+
+  if (!hasMigrated) {
+    await runMigrations();
+    hasMigrated = true;
+  }
+
+  await new Promise(function listenPromise(resolve, reject) {
+    serverInstance = app.listen(port, host, function onListen() {
+      resolve();
+    });
+    serverInstance.once("error", function onError(error) {
+      reject(error);
+    });
   });
+
+  const address = serverInstance.address();
+  return {
+    app: app,
+    server: serverInstance,
+    port: address && address.port ? address.port : port,
+    host: host,
+    provider: DB_PROVIDER,
+  };
+}
+
+async function stopServer() {
+  if (serverInstance) {
+    await new Promise(function closePromise(resolve, reject) {
+      serverInstance.close(function onClose(error) {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    serverInstance = null;
+  }
+
+  if (!poolClosed) {
+    await pool.end();
+    poolClosed = true;
+  }
 }
 
 function createMailer() {
@@ -863,6 +1079,90 @@ function buildLineItems(plan) {
     },
     quantity: 1,
   }];
+}
+
+function createDatabaseRuntime() {
+  if (CONFIG.usePgMem) {
+    var pgMem = require("pg-mem");
+    var db = pgMem.newDb({ autoCreateForeignKeyIndices: true });
+    db.public.registerFunction({
+      name: "now",
+      returns: "timestamptz",
+      implementation: function nowImpl() {
+        return new Date();
+      },
+    });
+    var adapter = db.adapters.createPg();
+    return {
+      provider: "pg-mem",
+      pool: new adapter.Pool(),
+    };
+  }
+
+  if (!CONFIG.databaseURL) {
+    throw new Error("DATABASE_URL is required unless USE_PG_MEM=1");
+  }
+
+  return {
+    provider: "postgres",
+    pool: new Pool({
+      connectionString: CONFIG.databaseURL,
+      ssl: CONFIG.postgresSSL ? { rejectUnauthorized: false } : false,
+    }),
+  };
+}
+
+function createRateLimiter(options) {
+  var config = Object.assign({
+    name: "rate-limit",
+    windowMs: 60 * 1000,
+    max: 60,
+    keyFn: function defaultKey(req) {
+      return getClientKey(req);
+    },
+  }, options || {});
+
+  var buckets = new Map();
+  var cleanupEvery = Math.max(15 * 1000, Math.floor(config.windowMs / 2));
+  var lastCleanup = Date.now();
+
+  return function limiter(req, res, next) {
+    var now = Date.now();
+    if ((now - lastCleanup) > cleanupEvery) {
+      buckets.forEach(function eachBucket(value, key) {
+        if (!value || value.resetAt <= now) {
+          buckets.delete(key);
+        }
+      });
+      lastCleanup = now;
+    }
+
+    var key = String(config.keyFn(req) || "");
+    if (!key) {
+      key = getClientKey(req);
+    }
+    var bucketKey = config.name + ":" + key;
+    var bucket = buckets.get(bucketKey);
+    if (!bucket || bucket.resetAt <= now) {
+      bucket = {
+        count: 0,
+        resetAt: now + config.windowMs,
+      };
+      buckets.set(bucketKey, bucket);
+    }
+
+    bucket.count += 1;
+    if (bucket.count > config.max) {
+      var retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      res.status(429).json({
+        error: "Demasiadas solicitudes. Intenta de nuevo en unos segundos.",
+        limiter: config.name,
+      });
+      return;
+    }
+    next();
+  };
 }
 
 async function runMigrations() {
@@ -1408,6 +1708,13 @@ function toPositiveInt(value, fallback) {
   return Math.max(1, Math.floor(parsed));
 }
 
+function getClientKey(req) {
+  var forwarded = String(req && req.headers && req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  var ip = forwarded || String(req && req.ip || req && req.socket && req.socket.remoteAddress || "unknown");
+  var authUser = req && req.authUser && req.authUser.id ? String(req.authUser.id) : "";
+  return authUser ? (ip + ":" + authUser) : ip;
+}
+
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/+$/, "");
 }
@@ -1494,3 +1801,21 @@ function extractOutput(payload) {
   }
   return "";
 }
+
+if (require.main === module) {
+  startServer().then(function onStarted(details) {
+    console.log("[simplify-backend] listening on port " + details.port + " (" + details.provider + ")");
+  }).catch(function fatal(error) {
+    console.error("[fatal] startup error", error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app: app,
+  pool: pool,
+  CONFIG: CONFIG,
+  startServer: startServer,
+  stopServer: stopServer,
+  runMigrations: runMigrations,
+};

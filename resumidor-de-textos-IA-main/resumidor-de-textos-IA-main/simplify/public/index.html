@@ -146,10 +146,19 @@
             <option value="90">90 días</option>
           </select>
         </label>
+        <label class="field-inline" for="admin-target-customer">
+          Customer ID destino
+          <input id="admin-target-customer" type="text" placeholder="cust_xxx">
+        </label>
+        <label class="field-inline" for="admin-grant-credits">
+          Créditos a acreditar
+          <input id="admin-grant-credits" type="number" min="1" value="10">
+        </label>
       </div>
       <div class="pay-actions">
         <button id="btn-admin-metrics" class="btn primary" type="button">Cargar métricas</button>
         <button id="btn-admin-reconcile" class="btn outline" type="button">Reconciliar pagos</button>
+        <button id="btn-admin-grant" class="btn ghost" type="button">Acreditar créditos</button>
       </div>
       <pre id="admin-output" class="panel"></pre>
     </section>
