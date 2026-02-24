@@ -1741,6 +1741,39 @@ async function getRecentUserActivityForRecovery(candidate) {
   return row;
 }
 
+async function hydrateRecoveryCandidate(candidate) {
+  var safeCandidate = Object.assign({
+    email: null,
+    name: null,
+    plan_tier: null,
+  }, candidate || {});
+  var userId = safeCandidate.user_id ? String(safeCandidate.user_id).trim() : "";
+  if (!userId) {
+    return safeCandidate;
+  }
+  var enriched = await withTransaction(async function tx(client) {
+    var userResult = await client.query(
+      "SELECT email, name FROM app_users WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    var creditsResult = await client.query(
+      "SELECT plan_tier FROM user_credits WHERE user_id = $1 LIMIT 1",
+      [userId]
+    );
+    var userRow = userResult.rows[0] || {};
+    var creditsRow = creditsResult.rows[0] || {};
+    return {
+      email: userRow.email || null,
+      name: userRow.name || null,
+      plan_tier: creditsRow.plan_tier || null,
+    };
+  });
+  safeCandidate.email = enriched.email;
+  safeCandidate.name = enriched.name;
+  safeCandidate.plan_tier = enriched.plan_tier;
+  return safeCandidate;
+}
+
 function classifyAcquisitionChannel(channelValue) {
   var normalized = normalizeAcquisitionChannel(channelValue) || "direct";
   if (["ads", "paid", "cpc", "ppc", "meta", "facebook", "googleads", "tiktok", "display"].includes(normalized)) {
@@ -2006,12 +2039,8 @@ async function runCheckoutRecoverySweep(options) {
           "ps.session_id, ps.user_id, ps.customer_id, ps.plan_id, ps.created_at,",
           "ps.acquisition_channel,",
           "COALESCE(ps.recovery_attempts, 0)::int AS recovery_attempts,",
-          "ps.recovery_email_sent_at, ps.recovery_next_attempt_at,",
-          "u.email, u.name,",
-          "uc.plan_tier",
+          "ps.recovery_email_sent_at, ps.recovery_next_attempt_at",
           "FROM payment_sessions ps",
-          "LEFT JOIN app_users u ON u.id = ps.user_id",
-          "LEFT JOIN user_credits uc ON uc.user_id = ps.user_id",
           "WHERE ps.status IN ('created','pending')",
           "AND COALESCE(ps.recovery_attempts, 0) < $1",
           "AND (ps.recovery_next_attempt_at IS NULL OR ps.recovery_next_attempt_at <= $2 OR $3 = TRUE)",
@@ -2034,7 +2063,7 @@ async function runCheckoutRecoverySweep(options) {
     let wouldEmail = 0;
 
     for (let i = 0; i < candidates.length; i += 1) {
-      const candidate = candidates[i];
+      const candidate = await hydrateRecoveryCandidate(candidates[i]);
       const attemptsCompleted = Math.max(0, Number(candidate.recovery_attempts || 0));
       const schedule = getRecoveryScheduleForAttempt(candidate.created_at, attemptsCompleted);
       if (schedule.done) {
