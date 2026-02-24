@@ -722,6 +722,10 @@
 
     function buildRequest(options) {
       var instructions = buildInstructions(options.action, options.profile, options.refinement);
+      var customerId = "";
+      if (global.SimplifyPayGuard && typeof global.SimplifyPayGuard.getCustomerId === "function") {
+        customerId = global.SimplifyPayGuard.getCustomerId();
+      }
       return {
         input: options.input,
         action: options.action,
@@ -734,6 +738,7 @@
         metadata: {
           source: options.source || "user",
           appVersion: "2026.02",
+          customerId: customerId,
         },
       };
     }
@@ -750,16 +755,27 @@
 
     function execute(options) {
       var text = (options.input || "").trim();
+      var guard = global.SimplifyPayGuard;
       if (!text) {
         panelRes.textContent = "Pega un texto para poder generar una salida.";
         tabs.selectTab("tab-res");
+        if (guard && typeof guard.trackEvent === "function") {
+          guard.trackEvent("generation_empty_input", {
+            source: options.source || "primary",
+          });
+        }
         return;
       }
 
-      var guard = global.SimplifyPayGuard;
       if (options.consumeCredit && guard && !guard.canUse()) {
         panelRes.textContent = "Te quedaste sin usos gratis. Puedes activar créditos para continuar.";
         tabs.selectTab("tab-res");
+        if (typeof guard.trackEvent === "function") {
+          guard.trackEvent("credits_blocked", {
+            action: options.action,
+            source: options.source || "primary",
+          });
+        }
         return;
       }
 
@@ -810,12 +826,31 @@
         state.last = payload;
         pushHistory(payload);
         render(payload);
+        if (guard && typeof guard.trackEvent === "function") {
+          guard.trackEvent("generation_completed", {
+            action: payload.action,
+            profile: payload.profile,
+            mode: payload.modeSelected,
+            engine: payload.engine,
+            inputWords: payload.inputWordCount,
+            outputWords: payload.outputWordCount,
+            compressionPct: payload.quality && payload.quality.compressionPct,
+            refinement: payload.refinement || "",
+          });
+        }
       }).catch(function (error) {
         panelRes.textContent = "No se pudo procesar el texto. Inténtalo de nuevo.";
         if (statusLine) {
           statusLine.textContent = "Error: " + (error && error.message ? error.message : "fallo inesperado");
         }
         tabs.selectTab("tab-res");
+        if (guard && typeof guard.trackEvent === "function") {
+          guard.trackEvent("generation_failed", {
+            action: options.action,
+            source: options.source || "primary",
+            reason: error && error.message ? error.message : "unknown",
+          });
+        }
       }).finally(function () {
         setLoadingState(false);
       });
@@ -849,6 +884,13 @@
           return;
         }
 
+        if (global.SimplifyPayGuard && typeof global.SimplifyPayGuard.trackEvent === "function") {
+          global.SimplifyPayGuard.trackEvent("refine_clicked", {
+            refine: button.getAttribute("data-refine") || "",
+            action: state.last.action || "suggest",
+          });
+        }
+
         execute({
           input: state.last.output,
           action: state.last.action || "suggest",
@@ -868,6 +910,12 @@
         copyToClipboard(state.last.output).then(function () {
           if (statusLine) {
             statusLine.textContent = "Resultado copiado al portapapeles.";
+          }
+          if (global.SimplifyPayGuard && typeof global.SimplifyPayGuard.trackEvent === "function") {
+            global.SimplifyPayGuard.trackEvent("result_copied", {
+              action: state.last.action || "suggest",
+              profile: state.last.profile || "general",
+            });
           }
         }).catch(function () {
           if (statusLine) {

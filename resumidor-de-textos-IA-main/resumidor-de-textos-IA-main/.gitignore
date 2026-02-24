@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+backend/node_modules/
+backend/.env
+backend/data/ledger.json
+backend/data/events.ndjson

@@ -50,14 +50,26 @@
       adminBypass: "simplify.adminBypass.v1",
       history: "simplify.history.v1",
       prefs: "simplify.prefs.v1",
+      customerId: "simplify.customerId.v1",
     },
     backend: {
-      endpoint: "",
+      endpoint: "http://localhost:8787/api/ai/generate",
       timeoutMs: 10000,
       model: "",
       mode: "generic",
       temperature: 0.2,
       headers: {},
+    },
+    monetization: {
+      apiBase: "http://localhost:8787",
+      eventsPath: "/api/events/track",
+      plansPath: "/api/pay/plans",
+      checkoutPath: "/api/pay/checkout",
+      balancePath: "/api/pay/balance",
+      consumePath: "/api/pay/consume",
+      oneCredits: 1,
+      packCredits: 10,
+      subCreditsPerCycle: 250,
     },
   };
 
@@ -66,6 +78,7 @@
   merged.links = Object.assign({}, defaults.links, incoming.links || {});
   merged.storage = Object.assign({}, defaults.storage, incoming.storage || {});
   merged.backend = Object.assign({}, defaults.backend, incoming.backend || {});
+  merged.monetization = Object.assign({}, defaults.monetization, incoming.monetization || {});
 
   global.SIMPLIFY_PAY_CONFIG = Object.freeze(merged);
 })(window);
