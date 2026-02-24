@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <link rel="preload" as="image" href="./pulse/logo-simplify-by-pulse.png?v=1760285328">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Simplify AI — Textos en 1 click</title>
+  <link rel="stylesheet" href="./styles.css?v=1758634303801">
+  <link rel="stylesheet" href="/css/theme.css">
+  <link rel="stylesheet" href="/css/skin-simplify.css">
+  <link rel="stylesheet" href="/css/sky.css">
+</head>
+<body>
+<div class="page-wrap">
+  <canvas id="sky"></canvas>
+  <main class="container">
+    <div class="hero hero-header">
+      <div class="hero-copy">
+        <h1>Simplify AI – Textos en 1 click</h1>
+        <div id="hero-avatar" class="hero-avatar">
+          <img src="/pulse/pulse-logo.png" alt="Pulse" />
+        </div>
+        <p class="hero-copy" id="hero-copy">
+          <span class="l1"><strong>Simplify</strong> entiende tus textos y los <strong>mejora en segundos</strong>.</span>
+          <span class="l2">Convierte lo largo en breve. Lo confuso en claro. Lo complicado en fácil de leer.</span>
+          <span class="l3">Resume, traduce o reescribe tu texto <strong>con la precisión de un experto</strong>.</span>
+          <span class="l4">Ideal para estudiantes, creadores y profesionales que necesitan comunicar mejor,</span>
+          <span class="l5"><strong>sin perder tiempo</strong>. Solo <strong>pegas tu texto</strong>, eliges lo que quieres…</span>
+          <span class="l6">y <strong>Simplify hace el resto</strong>.</span>
+        </p>
+      </div>
+    </div>
+
+    <section class="card" aria-labelledby="input-title">
+      <h2 id="input-title" class="sr-only">Entrada</h2>
+      <textarea id="input" rows="10" placeholder="Pega tu texto aquí…"></textarea>
+      <div class="actions">
+        <button id="btn-suggest" class="btn primary" type="button" data-action="suggest">Sugerencia</button>
+      </div>
+  </div>
+    </section>
+
+    <section class="card" aria-labelledby="chips-title">
+      <h3 id="chips-title">Acciones rápidas</h3>
+      <div id="chips-panel" class="chips-grid"></div>
+    </section>
+
+    <section id="pay-panel" class="card" aria-labelledby="pay-title">
+      <h3 id="pay-title">Créditos y suscripción</h3>
+      <p>Te quedan <strong id="uses-left">3/3</strong> usos gratis. Cuando se agoten, compra créditos:</p>
+      <div class="pay-actions">
+        <a id="pay-one"  class="btn primary" rel="noopener" target="_blank">1 uso · 1 €</a>
+        <a id="pay-pack" class="btn outline" rel="noopener" target="_blank">10 usos · 5 €</a>
+        <a id="pay-sub"  class="btn ghost"   rel="noopener" target="_blank">Suscripción · 8 €/mes</a>
+      </div>
+      <small>Stripe gestiona el pago. No guardamos datos de tarjetas.</small>
+    </section>
+
+    <section class="card" aria-labelledby="result-title">
+      <h3 id="result-title">Resultado</h3>
+
+      <div role="tablist" aria-label="Vistas de salida" class="tabs">
+        <button role="tab" aria-selected="true"  aria-controls="tab-res"  id="tabbtn-res"  class="tab">Resultado</button>
+        <button role="tab" aria-selected="false" aria-controls="tab-json" id="tabbtn-json" class="tab">JSON</button>
+        <button role="tab" aria-selected="false" aria-controls="tab-raw"  id="tabbtn-raw"  class="tab">Raw</button>
+      </div>
+
+      <div id="loading" hidden>Generando…</div>
+
+      <pre id="tab-res"  role="tabpanel" tabindex="0"  aria-labelledby="tabbtn-res"  class="panel"></pre>
+      <pre id="tab-json" role="tabpanel" tabindex="-1" aria-labelledby="tabbtn-json" class="panel" hidden></pre>
+      <pre id="tab-raw"  role="tabpanel" tabindex="-1" aria-labelledby="tabbtn-raw"  class="panel" hidden></pre>
+    </section>
+  </main>
+
+  <!-- Orden de scripts. Rutas relativas + cache-bust -->
+  <script src="./pay.config.js?v=1758634303801" defer></script>
+  <script src="./pay.guard.js?v=1758634303801"  defer></script>
+  <script src="./chips.js?v=1758634303801"      defer></script>
+  <script src="./pay.ui.js?v=1758634303801"     defer></script>
+  <script src="./main.js?v=1758634303801"       defer></script>
+  <script defer src="/js/sky.js"></script>
+</div><!--page-wrap-->
+  <!-- removed: pulse-side old logo -->
+  <!-- removed: pulse-side script -->
+  <div id="ai-result" style="display:none"></div>
+  <script defer src="/js/app-wire.js"></script>
+  <script defer src="/js/admin-mode.js"></script>
+  <script defer src="/js/admin-bypass.js"></script>
+  <script defer src="/js/admin-bypass.js"></script>
+  <script defer src="/js/result-router.js"></script>
+  <!-- === Footer Simplify – Firma + Futuro bloque legal === -->
+  <section class="footer-box card" aria-labelledby="footer-brand">
+    <div class="footer-brand">
+      <img id="footer-brand" src="./pulse/logo-simplify-by-pulse.png?v=1760283171" alt="Simplify by Pulse" width="240" height="64" loading="lazy" decoding="async" class="footer-logo" / srcset="./pulse/logo-simplify-by-pulse.png 1x, ./pulse/logo-simplify-by-pulse@2x.png 2x">
+    </div>
+    <div class="footer-meta">
+      <nav class="footer-links" aria-label="Enlaces legales">
+        <a href="/legal/terms.html">Términos</a>
+        <a href="/legal/privacy.html">Privacidad</a>
+        <a href="/legal/cookies.html">Cookies</a>
+        <a href="/legal/faq.html">Preguntas frecuentes</a>
+        <a href="/legal/contact.html">Contacto</a>
+      </nav>
+    </div>
+  </section>
+</body>
+</html>

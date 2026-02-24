@@ -1,0 +1,1 @@
+# Simplify — en desarrollo privado
