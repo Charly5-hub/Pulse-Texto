@@ -587,7 +587,7 @@ app.post("/api/pay/consume", RATE_LIMITERS.payConsume, async function consumeCre
       }
 
       await client.query(
-        "UPDATE user_credits SET credits = credits - $2, total_consumed = total_consumed + $2, updated_at = NOW() WHERE user_id = $1",
+        "UPDATE user_credits SET credits = GREATEST(0, credits - $2::int), total_consumed = total_consumed + $2::int, updated_at = NOW() WHERE user_id = $1",
         [user.id, units]
       );
 
@@ -754,10 +754,10 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
   try {
     const summary = await withTransaction(async function tx(client) {
       const userStats = await client.query(
-        "SELECT COUNT(*)::int AS total_users, COUNT(*) FILTER (WHERE provider <> 'anonymous' OR email IS NOT NULL OR google_sub IS NOT NULL)::int AS authenticated_users FROM app_users"
+        "SELECT COUNT(*)::int AS total_users, COALESCE(SUM(CASE WHEN provider <> 'anonymous' OR email IS NOT NULL OR google_sub IS NOT NULL THEN 1 ELSE 0 END),0)::int AS authenticated_users FROM app_users"
       );
       const creditsStats = await client.query(
-        "SELECT COUNT(*) FILTER (WHERE total_purchased > 0)::int AS paying_users, COUNT(*) FILTER (WHERE subscription_active = true)::int AS active_subscriptions, COALESCE(SUM(credits),0)::int AS total_credits_remaining FROM user_credits"
+        "SELECT COALESCE(SUM(CASE WHEN total_purchased > 0 THEN 1 ELSE 0 END),0)::int AS paying_users, COALESCE(SUM(CASE WHEN subscription_active THEN 1 ELSE 0 END),0)::int AS active_subscriptions, COALESCE(SUM(credits),0)::int AS total_credits_remaining FROM user_credits"
       );
       const revenueStats = await client.query(
         "SELECT COALESCE(SUM(amount_total),0)::bigint AS revenue_cents, COUNT(*)::int AS completed_payments FROM payment_sessions WHERE status = 'completed'"
@@ -771,11 +771,11 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         [since.toISOString()]
       );
       const dailyEvents = await client.query(
-        "SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'YYYY-MM-DD') AS day, event_name, COUNT(*)::int AS total FROM app_events WHERE created_at >= $1 GROUP BY day, event_name ORDER BY day ASC, event_name ASC",
+        "SELECT CAST(created_at AS DATE) AS day, event_name, COUNT(*)::int AS total FROM app_events WHERE created_at >= $1 GROUP BY day, event_name ORDER BY day ASC, event_name ASC",
         [since.toISOString()]
       );
       const dailyRevenue = await client.query(
-        "SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'YYYY-MM-DD') AS day, COALESCE(SUM(amount_total),0)::bigint AS revenue_cents, COUNT(*)::int AS payments FROM payment_sessions WHERE status = 'completed' AND created_at >= $1 GROUP BY day ORDER BY day ASC",
+        "SELECT CAST(created_at AS DATE) AS day, COALESCE(SUM(amount_total),0)::bigint AS revenue_cents, COUNT(*)::int AS payments FROM payment_sessions WHERE status = 'completed' AND created_at >= $1 GROUP BY day ORDER BY day ASC",
         [since.toISOString()]
       );
 
@@ -858,7 +858,7 @@ app.post("/api/admin/credits/grant", requireAdmin, RATE_LIMITERS.adminWrite, asy
       }
 
       await client.query(
-        "UPDATE user_credits SET credits = credits + $2, total_purchased = total_purchased + $2, updated_at = NOW() WHERE user_id = $1",
+        "UPDATE user_credits SET credits = credits + $2::int, total_purchased = total_purchased + $2::int, updated_at = NOW() WHERE user_id = $1",
         [target.id, requestedCredits]
       );
       await recordEvent(client, "admin_credits_granted", target.id, target.customer_id, {
@@ -1444,7 +1444,7 @@ async function processCheckoutCompleted(client, session) {
 
   if (!alreadyGranted && creditsGranted > 0) {
     await client.query(
-      "UPDATE user_credits SET credits = credits + $2, total_purchased = total_purchased + $2, updated_at = NOW() WHERE user_id = $1",
+      "UPDATE user_credits SET credits = credits + $2::int, total_purchased = total_purchased + $2::int, updated_at = NOW() WHERE user_id = $1",
       [user.id, creditsGranted]
     );
   }
