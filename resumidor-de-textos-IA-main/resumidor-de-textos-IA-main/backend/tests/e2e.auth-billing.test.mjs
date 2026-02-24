@@ -404,6 +404,63 @@ test("checkout recovery sweep processes pending sessions", async () => {
   assert.equal(rowAfterForce.rowCount, 1);
   assert.equal(Number(rowAfterForce.rows[0].recovery_attempts || 0), 2);
   assert.equal(Number(rowAfterForce.rows[0].recovery_last_step || 0), 2);
+
+  const activeSessionId = "cs_recovery_active_stop_001";
+  const activeCreatedAt = new Date(Date.now() - 80 * 60 * 60 * 1000).toISOString();
+  const activeLastEmailAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  await backend.pool.query(
+    [
+      "INSERT INTO payment_sessions (",
+      "session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted,",
+      "acquisition_channel, recovery_attempts, recovery_email_sent_at, recovery_next_attempt_at, created_at, updated_at",
+      ") VALUES ($1,$2,$3,$4,'pending',NULL,$5,$6,false,$7,$8,$9,$10,$11,$12)",
+    ].join(" "),
+    [
+      activeSessionId,
+      userId,
+      customerId,
+      "one",
+      "eur",
+      1,
+      "seo",
+      1,
+      activeLastEmailAt,
+      new Date().toISOString(),
+      activeCreatedAt,
+      new Date().toISOString(),
+    ]
+  );
+  await backend.pool.query(
+    "INSERT INTO app_events (event_name, user_id, customer_id, payload, created_at) VALUES ($1,$2,$3,$4,$5)",
+    ["generation_completed", userId, customerId, JSON.stringify({ source: "test" }), new Date().toISOString()]
+  );
+
+  const runWithRecentActivity = await requestJSON(
+    "POST",
+    "/api/admin/recovery/checkout/run",
+    {
+      limit: 20,
+      force: true,
+    },
+    { "x-admin-key": "test-admin-key" }
+  );
+  assert.equal(runWithRecentActivity.ok, true);
+  assert.ok(Number(runWithRecentActivity.suppressedActive || 0) >= 1);
+
+  const activeSessionRow = await backend.pool.query(
+    "SELECT recovery_attempts, recovery_last_error, recovery_next_attempt_at FROM payment_sessions WHERE session_id = $1",
+    [activeSessionId]
+  );
+  assert.equal(activeSessionRow.rowCount, 1);
+  assert.equal(Number(activeSessionRow.rows[0].recovery_attempts || 0), 3);
+  assert.equal(String(activeSessionRow.rows[0].recovery_last_error || ""), "stopped-user-active");
+  assert.equal(activeSessionRow.rows[0].recovery_next_attempt_at, null);
+
+  const suppressedRows = await backend.pool.query(
+    "SELECT payload FROM app_events WHERE event_name = 'checkout_recovery_suppressed_active' AND payload->>'sessionId' = $1",
+    [activeSessionId]
+  );
+  assert.ok(suppressedRows.rowCount >= 1);
 });
 
 test("admin metrics endpoint returns kpis and funnel", async () => {
@@ -419,6 +476,7 @@ test("admin metrics endpoint returns kpis and funnel", async () => {
   assert.ok(typeof metrics.funnel.generationCompleted === "number");
   assert.ok(typeof metrics.unitEconomics.ltvCacRatio === "number");
   assert.ok(typeof metrics.checkoutRecovery.conversionRatePct === "number");
+  assert.ok(typeof metrics.checkoutRecovery.suppressedActive === "number");
   assert.ok(Array.isArray(metrics.checkoutRecovery.byVariant));
   assert.ok(Array.isArray(metrics.checkoutRecovery.bySegment));
   assert.ok(Array.isArray(metrics.events));

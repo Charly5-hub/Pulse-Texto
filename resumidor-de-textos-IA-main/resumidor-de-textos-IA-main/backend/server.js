@@ -56,6 +56,8 @@ const CONFIG = {
   recoveryBatchSize: Math.max(1, Math.min(100, readNumber("RECOVERY_BATCH_SIZE", 25))),
   recoverySequenceHours: parseRecoverySequenceHours(String(process.env.RECOVERY_SEQUENCE_HOURS || "1,24,72")),
   recoveryABEnabled: String(process.env.RECOVERY_AB_ENABLED || "1").trim() !== "0",
+  recoveryStopOnActivity: String(process.env.RECOVERY_STOP_ON_ACTIVITY || "1").trim() !== "0",
+  recoveryActivityWindowHours: Math.max(1, readNumber("RECOVERY_ACTIVITY_WINDOW_HOURS", 168)),
   maxInputFree: Math.max(500, readNumber("MAX_INPUT_FREE", 8000)),
   maxInputOne: Math.max(1000, readNumber("MAX_INPUT_ONE", 12000)),
   maxInputPack: Math.max(1000, readNumber("MAX_INPUT_PACK", 20000)),
@@ -324,6 +326,8 @@ app.get("/api/health", async function healthHandler(_req, res) {
         firstDelayMinutes: Math.round((CONFIG.recoverySequenceHours[0] || 1) * 60),
         maxAttempts: CONFIG.recoveryMaxAttempts,
         abEnabled: CONFIG.recoveryABEnabled,
+        stopOnActivity: CONFIG.recoveryStopOnActivity,
+        activityWindowHours: CONFIG.recoveryActivityWindowHours,
       },
       planLimits: PLAN_LIMITS,
       plans: publicPlans(),
@@ -1137,6 +1141,7 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
     const recoverySent = Number(summary.recovery.sent || 0);
     const recoveryConverted = Number(summary.recovery.converted || 0);
     const recoveryCandidates = Number(summary.recovery.candidates || 0);
+    const recoverySuppressedActive = Number(eventMap.checkout_recovery_suppressed_active || 0);
     const recoveryByVariantMap = {};
     const recoveryBySegmentMap = {};
     (summary.recoveryEmailPayloads || []).forEach(function eachRecoveryRow(row) {
@@ -1205,6 +1210,7 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         candidates: recoveryCandidates,
         sent: recoverySent,
         converted: recoveryConverted,
+        suppressedActive: recoverySuppressedActive,
         conversionRatePct: recoverySent > 0 ? Number(((recoveryConverted / recoverySent) * 100).toFixed(2)) : 0,
         byVariant: recoveryByVariant,
         bySegment: recoveryBySegment,
@@ -1392,6 +1398,10 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
         "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE status = 'completed' AND recovery_email_sent_at IS NOT NULL AND updated_at >= $1",
         [since.toISOString()]
       );
+      const suppressed = await client.query(
+        "SELECT COUNT(*)::int AS total FROM app_events WHERE event_name = 'checkout_recovery_suppressed_active' AND created_at >= $1",
+        [since.toISOString()]
+      );
       const payloadRows = await client.query(
         "SELECT payload FROM app_events WHERE event_name = 'checkout_recovery_email_sent' AND created_at >= $1",
         [since.toISOString()]
@@ -1409,6 +1419,7 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
         candidates: Number(candidates.rows[0].total || 0),
         sent: Number(sent.rows[0].total || 0),
         converted: Number(converted.rows[0].total || 0),
+        suppressedActive: Number(suppressed.rows[0].total || 0),
         byStep: Object.keys(byStepMap).sort().map(function mapStep(step) {
           return { step: step, total: byStepMap[step] };
         }),
@@ -1425,10 +1436,12 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
         candidates: stats.candidates,
         sent: stats.sent,
         converted: stats.converted,
+        suppressedActive: stats.suppressedActive,
         conversionRatePct: stats.sent > 0 ? Number(((stats.converted / stats.sent) * 100).toFixed(2)) : 0,
         byStep: stats.byStep,
         byVariant: stats.byVariant,
         sequenceHours: getRecoverySequenceHours(),
+        stopOnActivity: CONFIG.recoveryStopOnActivity,
       },
     });
   } catch (error) {
@@ -1614,7 +1627,7 @@ async function deliverOTPEmail(email, code, expiresAt) {
   return "smtp";
 }
 
-async function deliverEmail(to, subject, text) {
+async function deliverEmail(to, subject, text, html) {
   if (!mailer) {
     console.info("[dev-email] to=%s subject=%s", to, subject);
     return "dev-log";
@@ -1624,6 +1637,7 @@ async function deliverEmail(to, subject, text) {
     to: to,
     subject: subject,
     text: text,
+    html: html || undefined,
   });
   return "smtp";
 }
@@ -1680,6 +1694,51 @@ function getRecoveryScheduleForAttempt(createdAtInput, attemptsCompleted) {
     nextAttemptAt: nextAttemptAt,
     totalSteps: sequence.length,
   };
+}
+
+function getRecoveryActivitySince(candidate) {
+  var lookback = new Date(Date.now() - CONFIG.recoveryActivityWindowHours * 60 * 60 * 1000);
+  var lastRecoveryEmail = new Date(candidate && candidate.recovery_email_sent_at || "");
+  if (Number.isNaN(lastRecoveryEmail.getTime())) {
+    return lookback;
+  }
+  return lastRecoveryEmail.getTime() > lookback.getTime() ? lastRecoveryEmail : lookback;
+}
+
+async function getRecentUserActivityForRecovery(candidate) {
+  if (!CONFIG.recoveryStopOnActivity) {
+    return null;
+  }
+  var userId = candidate && candidate.user_id ? String(candidate.user_id).trim() : "";
+  var customerId = normalizeCustomerId(candidate && candidate.customer_id);
+  if (!userId && !customerId) {
+    return null;
+  }
+  var since = getRecoveryActivitySince(candidate);
+  var query = [
+    "SELECT event_name, created_at",
+    "FROM app_events",
+    "WHERE created_at >= $1",
+    "AND event_name NOT LIKE 'checkout_recovery_%'",
+    "AND event_name NOT LIKE 'admin_%'",
+  ];
+  var params = [since.toISOString()];
+  if (userId && customerId) {
+    query.push("AND (user_id = $2 OR customer_id = $3)");
+    params.push(userId, customerId);
+  } else if (userId) {
+    query.push("AND user_id = $2");
+    params.push(userId);
+  } else {
+    query.push("AND customer_id = $2");
+    params.push(customerId);
+  }
+  query.push("ORDER BY created_at DESC LIMIT 1");
+  var row = await withTransaction(async function tx(client) {
+    var result = await client.query(query.join(" "), params);
+    return result.rows[0] || null;
+  });
+  return row;
 }
 
 function classifyAcquisitionChannel(channelValue) {
@@ -1781,6 +1840,59 @@ function buildRecoveryCopyContext(candidate, recoveryContext) {
   };
 }
 
+function escapeHTML(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildRecoveryEmailHTML(copy, checkoutURL, recoveryContext) {
+  var ctaURL = escapeHTML(checkoutURL);
+  var safePlanCopy = escapeHTML(copy.planCopy);
+  var safeChannelCopy = escapeHTML(copy.channelCopy);
+  var safeStepCopy = escapeHTML(copy.stepCopy);
+  var safeName = copy.customerName ? (" " + escapeHTML(copy.customerName)) : "";
+  var variantTag = escapeHTML(String(recoveryContext && recoveryContext.variant || "A"));
+  return [
+    "<!doctype html>",
+    "<html lang=\"es\">",
+    "<head>",
+    "<meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<title>Simplify</title>",
+    "</head>",
+    "<body style=\"margin:0;padding:0;background:#f5f7fb;font-family:Inter,Segoe UI,Arial,sans-serif;color:#0f172a;\">",
+    "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f5f7fb;padding:24px 12px;\">",
+    "<tr><td align=\"center\">",
+    "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:620px;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;\">",
+    "<tr><td style=\"padding:18px 22px;background:#0f172a;color:#ffffff;\">",
+    "<div style=\"font-size:18px;font-weight:700;\">Simplify by Pulse</div>",
+    "<div style=\"font-size:12px;opacity:.8;margin-top:4px;\">Recordatorio de checkout</div>",
+    "</td></tr>",
+    "<tr><td style=\"padding:22px;\">",
+    "<p style=\"margin:0 0 12px;font-size:16px;line-height:1.55;\">Hola" + safeName + ",</p>",
+    "<p style=\"margin:0 0 10px;font-size:15px;line-height:1.6;\">Vimos que dejaste tu compra sin completar.</p>",
+    "<p style=\"margin:0 0 10px;font-size:15px;line-height:1.6;\">" + safePlanCopy + "</p>",
+    "<p style=\"margin:0 0 10px;font-size:15px;line-height:1.6;\">" + safeChannelCopy + "</p>",
+    "<p style=\"margin:0 0 18px;font-size:14px;color:#475569;\">" + safeStepCopy + " · Variante " + variantTag + "</p>",
+    "<p style=\"margin:0 0 18px;\">",
+    "<a href=\"" + ctaURL + "\" style=\"display:inline-block;padding:12px 18px;border-radius:999px;background:#2563eb;color:#ffffff;text-decoration:none;font-weight:600;\">Retomar checkout seguro</a>",
+    "</p>",
+    "<p style=\"margin:0 0 8px;font-size:13px;color:#64748b;\">Si ya completaste el pago, ignora este correo.</p>",
+    "<p style=\"margin:0;font-size:13px;color:#64748b;\">Equipo Simplify</p>",
+    "</td></tr>",
+    "</table>",
+    "<p style=\"max-width:620px;margin:10px auto 0;font-size:11px;color:#94a3b8;\">Este mensaje es transaccional y está relacionado con tu proceso de compra.</p>",
+    "</td></tr>",
+    "</table>",
+    "</body>",
+    "</html>",
+  ].join("");
+}
+
 function buildRecoveryEmailPayload(candidate, checkoutURL, recoveryContext) {
   var copy = buildRecoveryCopyContext(candidate, recoveryContext);
   var subject = buildRecoverySubject({
@@ -1803,9 +1915,11 @@ function buildRecoveryEmailPayload(candidate, checkoutURL, recoveryContext) {
     "",
     "Equipo Simplify",
   ].join("\n");
+  var html = buildRecoveryEmailHTML(copy, checkoutURL, recoveryContext);
   return {
     subject: subject,
     text: text,
+    html: html,
   };
 }
 
@@ -1816,7 +1930,7 @@ async function sendCheckoutRecoveryEmail(candidate, checkoutURL, recoveryContext
   }
 
   const payload = buildRecoveryEmailPayload(candidate, checkoutURL, recoveryContext);
-  const delivery = await deliverEmail(email, payload.subject, payload.text);
+  const delivery = await deliverEmail(email, payload.subject, payload.text, payload.html);
   return {
     delivery: delivery,
     subject: payload.subject,
@@ -1873,6 +1987,8 @@ async function runCheckoutRecoverySweep(options) {
       emailed: 0,
       reconciled: 0,
       failed: 0,
+      suppressedActive: 0,
+      skippedNoEmail: 0,
       dryRun: Boolean(opts.dryRun),
     };
   }
@@ -1913,6 +2029,7 @@ async function runCheckoutRecoverySweep(options) {
     let emailed = 0;
     let failed = 0;
     let skippedNoEmail = 0;
+    let suppressedActive = 0;
     let notReady = 0;
     let wouldEmail = 0;
 
@@ -1978,6 +2095,35 @@ async function runCheckoutRecoverySweep(options) {
           });
         });
         continue;
+      }
+
+      if (CONFIG.recoveryStopOnActivity && attemptsCompleted > 0 && candidate.recovery_email_sent_at) {
+        const recentActivity = await getRecentUserActivityForRecovery(candidate);
+        if (recentActivity) {
+          suppressedActive += 1;
+          if (!opts.dryRun) {
+            await withTransaction(async function tx(client) {
+              await client.query(
+                "UPDATE payment_sessions SET recovery_attempts = $2, recovery_last_error = $3, recovery_last_variant = $4, recovery_last_step = $5, recovery_next_attempt_at = NULL, updated_at = NOW() WHERE session_id = $1",
+                [candidate.session_id, totalSteps, "stopped-user-active", variant, schedule.stepNumber]
+              );
+              await recordEvent(client, "checkout_recovery_suppressed_active", candidate.user_id || null, candidate.customer_id || null, {
+                sessionId: candidate.session_id,
+                stepNumber: schedule.stepNumber,
+                totalSteps: schedule.totalSteps,
+                variant: variant,
+                segmentPlan: planTier,
+                segmentChannel: segmentChannel,
+                activityEvent: String(recentActivity.event_name || "unknown"),
+                activityAt: recentActivity.created_at && typeof recentActivity.created_at.toISOString === "function"
+                  ? recentActivity.created_at.toISOString()
+                  : String(recentActivity.created_at || ""),
+                trigger: opts.trigger,
+              });
+            });
+          }
+          continue;
+        }
       }
 
       if (opts.dryRun) {
@@ -2049,6 +2195,7 @@ async function runCheckoutRecoverySweep(options) {
       emailed: emailed,
       reconciled: reconciled,
       failed: failed,
+      suppressedActive: suppressedActive,
       skippedNoEmail: skippedNoEmail,
       sequenceHours: getRecoverySequenceHours(),
     };
