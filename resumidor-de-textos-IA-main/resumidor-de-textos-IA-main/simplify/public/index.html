@@ -172,11 +172,22 @@
           Créditos a acreditar
           <input id="admin-grant-credits" type="number" min="1" value="10">
         </label>
+        <label class="field-inline" for="admin-plan-tier">
+          Asignar plan/tier
+          <select id="admin-plan-tier">
+            <option value="free">free</option>
+            <option value="one">one</option>
+            <option value="pack" selected>pack</option>
+            <option value="sub">sub</option>
+          </select>
+        </label>
       </div>
       <div class="pay-actions">
         <button id="btn-admin-metrics" class="btn primary" type="button">Cargar métricas</button>
         <button id="btn-admin-reconcile" class="btn outline" type="button">Reconciliar pagos</button>
         <button id="btn-admin-grant" class="btn ghost" type="button">Acreditar créditos</button>
+        <button id="btn-admin-assign-plan" class="btn outline" type="button">Asignar plan</button>
+        <button id="btn-admin-recovery-run" class="btn ghost" type="button">Run recuperación checkout</button>
       </div>
       <pre id="admin-output" class="panel"></pre>
     </section>

@@ -13,6 +13,7 @@
   var creditsKey = storageKeys.paidCredits || "simplify.paidCredits.v1";
   var bypassKey = storageKeys.adminBypass || "simplify.adminBypass.v1";
   var customerKey = storageKeys.customerId || "simplify.customerId.v1";
+  var planTierKey = storageKeys.planTier || "simplify.planTier.v1";
 
   var freeUses = Number(config.freeUses || 3);
   var listeners = [];
@@ -123,6 +124,7 @@
     var paidCredits = readInt(creditsKey, 0);
     var bypass = safeGet(bypassKey) === "1";
     var freeLeft = Math.max(0, freeUses - used);
+    var planTier = toNonEmptyString(safeGet(planTierKey)) || "free";
 
     return {
       customerId: getCustomerId(),
@@ -130,6 +132,7 @@
       freeUsed: used,
       freeLeft: freeLeft,
       paidCredits: paidCredits,
+      planTier: planTier,
       bypass: bypass,
       available: bypass ? Number.POSITIVE_INFINITY : (freeLeft + paidCredits),
     };
@@ -184,6 +187,7 @@
         var credits = Number(balance && balance.credits);
         var remoteFreeUses = Number(balance && balance.freeUses);
         var remoteFreeUsed = Number(balance && balance.freeUsed);
+        var remotePlanTier = toNonEmptyString(balance && balance.planTier);
         var remoteCustomer = toNonEmptyString(payload && payload.customerId);
 
         if (Number.isFinite(credits)) {
@@ -194,6 +198,9 @@
         }
         if (Number.isFinite(remoteFreeUsed) && remoteFreeUsed >= 0) {
           safeSet(usageKey, Math.max(0, Math.floor(remoteFreeUsed)));
+        }
+        if (remotePlanTier) {
+          safeSet(planTierKey, remotePlanTier);
         }
         if (remoteCustomer) {
           setCustomerId(remoteCustomer);

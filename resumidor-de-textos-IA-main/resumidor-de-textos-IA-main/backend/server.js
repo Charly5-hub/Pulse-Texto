@@ -49,6 +49,15 @@ const CONFIG = {
   smtpFrom: String(process.env.SMTP_FROM || "noreply@simplify.local").trim(),
   legalVersion: String(process.env.LEGAL_VERSION || "2026-02").trim(),
   legalRequireCheckoutConsent: String(process.env.LEGAL_REQUIRE_CHECKOUT_CONSENT || "1").trim() !== "0",
+  marketingSpendMonthlyCents: readNumber("MARKETING_SPEND_MONTHLY_CENTS", 0),
+  recoverySweepMinutes: Math.max(1, readNumber("RECOVERY_SWEEP_MINUTES", 15)),
+  recoveryDelayMinutes: Math.max(1, readNumber("RECOVERY_DELAY_MINUTES", 45)),
+  recoveryMaxAttempts: Math.max(1, readNumber("RECOVERY_MAX_ATTEMPTS", 2)),
+  recoveryBatchSize: Math.max(1, Math.min(100, readNumber("RECOVERY_BATCH_SIZE", 25))),
+  maxInputFree: Math.max(500, readNumber("MAX_INPUT_FREE", 8000)),
+  maxInputOne: Math.max(1000, readNumber("MAX_INPUT_ONE", 12000)),
+  maxInputPack: Math.max(1000, readNumber("MAX_INPUT_PACK", 20000)),
+  maxInputSub: Math.max(1000, readNumber("MAX_INPUT_SUB", 32000)),
 };
 
 const dbRuntime = createDatabaseRuntime();
@@ -84,6 +93,20 @@ const PLAN_CONFIG = {
     unitAmountCents: CONFIG.priceSubCents,
     stripePriceId: String(process.env.STRIPE_PRICE_SUB || "").trim(),
   },
+};
+
+const PLAN_TIER_ORDER = {
+  free: 0,
+  one: 1,
+  pack: 2,
+  sub: 3,
+};
+
+const PLAN_LIMITS = {
+  free: { maxInputChars: CONFIG.maxInputFree },
+  one: { maxInputChars: CONFIG.maxInputOne },
+  pack: { maxInputChars: CONFIG.maxInputPack },
+  sub: { maxInputChars: CONFIG.maxInputSub },
 };
 
 const ALLOW_ANY_ORIGIN = CONFIG.frontendOrigins.includes("*");
@@ -293,6 +316,12 @@ app.get("/api/health", async function healthHandler(_req, res) {
         version: CONFIG.legalVersion,
         checkoutConsentRequired: CONFIG.legalRequireCheckoutConsent,
       },
+      recovery: {
+        sweepMinutes: CONFIG.recoverySweepMinutes,
+        delayMinutes: CONFIG.recoveryDelayMinutes,
+        maxAttempts: CONFIG.recoveryMaxAttempts,
+      },
+      planLimits: PLAN_LIMITS,
       plans: publicPlans(),
       now: new Date().toISOString(),
     });
@@ -583,6 +612,7 @@ app.get("/api/pay/plans", function getPlans(_req, res) {
       version: CONFIG.legalVersion,
       checkoutConsentRequired: CONFIG.legalRequireCheckoutConsent,
     },
+    limits: PLAN_LIMITS,
     plans: publicPlans(),
   });
 });
@@ -887,8 +917,8 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
     res.status(400).json({ error: "input es obligatorio." });
     return;
   }
-  if (input.length > 32000) {
-    res.status(413).json({ error: "input excede límite de 32000 caracteres." });
+  if (input.length > PLAN_LIMITS.sub.maxInputChars) {
+    res.status(413).json({ error: "input excede límite absoluto permitido." });
     return;
   }
   if (userPrompt.length > 40000) {
@@ -909,13 +939,22 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
         if (!user) {
           throw createError("customerId o sesión autenticada requerida para generar.", 400);
         }
+      const effectivePlanTier = getEffectivePlanTier(user);
+      const limits = getPlanLimitsForTier(effectivePlanTier);
+      if (input.length > limits.maxInputChars) {
+        throw createError(
+          "El texto supera el límite de tu plan actual (" + effectivePlanTier + "). Máximo " + limits.maxInputChars + " caracteres.",
+          413
+        );
+      }
       const billing = await consumeGenerationQuota(client, user.id);
       await recordEvent(client, "generation_billed", user.id, user.customer_id, {
         source: billing.source,
         style: narrativeStyle,
+        planTier: effectivePlanTier,
       });
       const refreshed = await getUserById(client, user.id);
-      billed = { source: billing.source, userId: user.id };
+      billed = { source: billing.source, userId: user.id, planTier: effectivePlanTier };
       return refreshed;
     });
 
@@ -963,6 +1002,8 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
       billing: {
         source: billed && billed.source ? billed.source : "unknown",
       },
+      planTier: billed && billed.planTier ? billed.planTier : "free",
+      limits: getPlanLimitsForTier(billed && billed.planTier ? billed.planTier : "free"),
       style: narrativeStyle,
       balance: buildBalancePayload(actor),
     });
@@ -997,8 +1038,32 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
       const revenueStats = await client.query(
         "SELECT COALESCE(SUM(amount_total),0)::bigint AS revenue_cents, COUNT(*)::int AS completed_payments FROM payment_sessions WHERE status = 'completed'"
       );
+      const revenueWindowStats = await client.query(
+        "SELECT COALESCE(SUM(amount_total),0)::bigint AS revenue_cents FROM payment_sessions WHERE status = 'completed' AND created_at >= $1",
+        [since.toISOString()]
+      );
+      const newPayingWindowStats = await client.query(
+        [
+          "SELECT COUNT(*)::int AS total FROM (",
+          "SELECT user_id, MIN(created_at) AS first_paid_at",
+          "FROM payment_sessions",
+          "WHERE status = 'completed' AND user_id IS NOT NULL",
+          "GROUP BY user_id",
+          ") x",
+          "WHERE first_paid_at >= $1",
+        ].join(" "),
+        [since.toISOString()]
+      );
+      const marketingSpendStats = await client.query(
+        "SELECT COALESCE(SUM(amount_cents),0)::bigint AS spend_cents FROM marketing_costs WHERE spent_at >= $1",
+        [since.toISOString()]
+      );
       const legalStats = await client.query(
         "SELECT version, COUNT(DISTINCT user_id)::int AS accepted_users FROM legal_consents GROUP BY version ORDER BY version DESC"
+      );
+      const recoveryStats = await client.query(
+        "SELECT COALESCE(SUM(CASE WHEN recovery_email_sent_at IS NOT NULL THEN 1 ELSE 0 END),0)::int AS sent, COALESCE(SUM(CASE WHEN recovery_email_sent_at IS NOT NULL AND status = 'completed' THEN 1 ELSE 0 END),0)::int AS converted, COALESCE(SUM(CASE WHEN status IN ('created','pending') AND created_at <= $1 THEN 1 ELSE 0 END),0)::int AS candidates FROM payment_sessions",
+        [new Date(Date.now() - CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString()]
       );
       const eventsStats = await client.query(
         "SELECT event_name, COUNT(*)::int AS total FROM app_events WHERE created_at >= $1 GROUP BY event_name ORDER BY total DESC",
@@ -1021,7 +1086,11 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         users: userStats.rows[0],
         credits: creditsStats.rows[0],
         revenue: revenueStats.rows[0],
+        revenueWindow: revenueWindowStats.rows[0],
+        newPayingWindow: newPayingWindowStats.rows[0],
+        marketingSpendWindow: marketingSpendStats.rows[0],
         legalConsents: legalStats.rows,
+        recovery: recoveryStats.rows[0],
         events: eventsStats.rows,
         topActions: actionStats.rows,
         dailyEvents: dailyEvents.rows,
@@ -1038,6 +1107,19 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
     const checkoutSuccess = Number(eventMap.checkout_success_return || 0);
     const generationCompleted = Number(eventMap.generation_completed || 0);
     const copied = Number(eventMap.result_copied || 0);
+    const totalRevenueCents = Number(summary.revenue.revenue_cents || 0);
+    const payingUsers = Number(summary.credits.paying_users || 0);
+    const ltvCents = payingUsers > 0 ? Math.round(totalRevenueCents / payingUsers) : 0;
+    const windowRevenueCents = Number(summary.revenueWindow.revenue_cents || 0);
+    const windowNewPayingUsers = Number(summary.newPayingWindow.total || 0);
+    const explicitMarketingSpend = Number(summary.marketingSpendWindow.spend_cents || 0);
+    const fallbackSpend = Math.round((Math.max(0, Number(CONFIG.marketingSpendMonthlyCents || 0)) * days) / 30);
+    const marketingSpendCents = explicitMarketingSpend > 0 ? explicitMarketingSpend : fallbackSpend;
+    const cacCents = windowNewPayingUsers > 0 ? Math.round(marketingSpendCents / windowNewPayingUsers) : 0;
+    const ltvCacRatio = cacCents > 0 ? Number((ltvCents / cacCents).toFixed(2)) : 0;
+    const recoverySent = Number(summary.recovery.sent || 0);
+    const recoveryConverted = Number(summary.recovery.converted || 0);
+    const recoveryCandidates = Number(summary.recovery.candidates || 0);
 
     res.json({
       ok: true,
@@ -1064,6 +1146,22 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
         checkoutSuccessReturn: checkoutSuccess,
         checkoutReturnRatePct: checkoutStarted > 0 ? Number(((checkoutSuccess / checkoutStarted) * 100).toFixed(2)) : 0,
         copyRatePct: generationCompleted > 0 ? Number(((copied / generationCompleted) * 100).toFixed(2)) : 0,
+      },
+      unitEconomics: {
+        lifetimeRevenueCents: totalRevenueCents,
+        lifetimePayingUsers: payingUsers,
+        ltvCents: ltvCents,
+        windowRevenueCents: windowRevenueCents,
+        windowNewPayingUsers: windowNewPayingUsers,
+        marketingSpendCents: marketingSpendCents,
+        cacCents: cacCents,
+        ltvCacRatio: ltvCacRatio,
+      },
+      checkoutRecovery: {
+        candidates: recoveryCandidates,
+        sent: recoverySent,
+        converted: recoveryConverted,
+        conversionRatePct: recoverySent > 0 ? Number(((recoveryConverted / recoverySent) * 100).toFixed(2)) : 0,
       },
       events: summary.events,
       legalConsents: summary.legalConsents,
@@ -1120,6 +1218,150 @@ app.post("/api/admin/credits/grant", requireAdmin, RATE_LIMITERS.adminWrite, asy
   } catch (error) {
     const status = Number(error && error.statusCode) || 500;
     res.status(status).json({ error: String(error && error.message || "No se pudieron acreditar créditos.") });
+  }
+});
+
+app.post("/api/admin/plan/assign", requireAdmin, RATE_LIMITERS.adminWrite, async function assignPlanTier(req, res) {
+  const requestedTier = normalizePlanTier(req.body && req.body.planTier);
+  if (!requestedTier) {
+    res.status(400).json({ error: "planTier inválido. Usa free, one, pack o sub." });
+    return;
+  }
+
+  try {
+    const user = await withTransaction(async function tx(client) {
+      var target = null;
+      const targetUserId = String(req.body && req.body.userId || "").trim();
+      const targetCustomerId = normalizeCustomerId(req.body && req.body.customerId);
+
+      if (targetUserId) {
+        target = await getUserById(client, targetUserId);
+      }
+      if (!target && targetCustomerId) {
+        target = await getUserByCustomerId(client, targetCustomerId);
+      }
+      if (!target && targetCustomerId) {
+        target = await ensureUserByCustomerId(client, targetCustomerId);
+      }
+      if (!target) {
+        throw createError("No se encontró usuario objetivo para asignar plan.", 404);
+      }
+
+      await client.query(
+        "UPDATE user_credits SET plan_tier = $2, subscription_active = CASE WHEN $2 = 'sub' THEN true ELSE false END, updated_at = NOW() WHERE user_id = $1",
+        [target.id, requestedTier]
+      );
+      await recordEvent(client, "admin_plan_assigned", target.id, target.customer_id, {
+        planTier: requestedTier,
+      });
+      return getUserById(client, target.id);
+    });
+
+    res.json({
+      ok: true,
+      planTier: requestedTier,
+      user: publicUser(user),
+    });
+  } catch (error) {
+    const status = Number(error && error.statusCode) || 500;
+    res.status(status).json({ error: String(error && error.message || "No se pudo asignar plan.") });
+  }
+});
+
+app.post("/api/admin/marketing/spend", requireAdmin, RATE_LIMITERS.adminWrite, async function registerMarketingSpend(req, res) {
+  const rawAmount = Number(req.body && req.body.amountCents);
+  const amountCents = Number.isFinite(rawAmount) ? Math.floor(rawAmount) : 0;
+  const channel = normalizeMarketingChannel(req.body && req.body.channel);
+  const note = String(req.body && req.body.note || "").trim().slice(0, 240);
+  const spentAtRaw = String(req.body && req.body.spentAt || "").trim();
+  const spentAtDate = spentAtRaw ? new Date(spentAtRaw) : new Date();
+  if (amountCents <= 0 || amountCents > 100000000) {
+    res.status(400).json({ error: "amountCents debe estar entre 1 y 100000000." });
+    return;
+  }
+  if (!channel) {
+    res.status(400).json({ error: "channel es obligatorio (ej: ads, seo, afiliados)." });
+    return;
+  }
+  if (Number.isNaN(spentAtDate.getTime())) {
+    res.status(400).json({ error: "spentAt inválido." });
+    return;
+  }
+
+  try {
+    const created = await withTransaction(async function tx(client) {
+      const inserted = await client.query(
+        "INSERT INTO marketing_costs (channel, amount_cents, spent_at, note, created_at) VALUES ($1,$2,$3,$4,NOW()) RETURNING id, channel, amount_cents, spent_at, note, created_at",
+        [channel, amountCents, spentAtDate.toISOString(), note || null]
+      );
+      await recordEvent(client, "admin_marketing_spend_recorded", null, null, {
+        channel: channel,
+        amountCents: amountCents,
+      });
+      return inserted.rows[0];
+    });
+
+    res.json({
+      ok: true,
+      spend: created,
+    });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo registrar gasto de marketing.", detail: String(error && error.message || error) });
+  }
+});
+
+app.post("/api/admin/recovery/checkout/run", requireAdmin, RATE_LIMITERS.adminWrite, async function runCheckoutRecovery(req, res) {
+  const limit = Math.max(1, Math.min(100, toPositiveInt(req.body && req.body.limit, CONFIG.recoveryBatchSize)));
+  const dryRun = Boolean(req.body && req.body.dryRun);
+  try {
+    const result = await runCheckoutRecoverySweep({
+      trigger: "admin",
+      limit: limit,
+      dryRun: dryRun,
+      force: true,
+    });
+    res.json(Object.assign({ ok: true }, result));
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo ejecutar recuperación de checkout.", detail: String(error && error.message || error) });
+  }
+});
+
+app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminRead, async function checkoutRecoveryStats(req, res) {
+  const days = Math.max(1, Math.min(365, toPositiveInt(req.query && req.query.days, 30)));
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  try {
+    const stats = await withTransaction(async function tx(client) {
+      const candidates = await client.query(
+        "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE status IN ('created','pending') AND created_at <= $1",
+        [new Date(Date.now() - CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString()]
+      );
+      const sent = await client.query(
+        "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE recovery_email_sent_at IS NOT NULL AND recovery_email_sent_at >= $1",
+        [since.toISOString()]
+      );
+      const converted = await client.query(
+        "SELECT COUNT(*)::int AS total FROM payment_sessions WHERE status = 'completed' AND recovery_email_sent_at IS NOT NULL AND updated_at >= $1",
+        [since.toISOString()]
+      );
+      return {
+        candidates: Number(candidates.rows[0].total || 0),
+        sent: Number(sent.rows[0].total || 0),
+        converted: Number(converted.rows[0].total || 0),
+      };
+    });
+
+    res.json({
+      ok: true,
+      windowDays: days,
+      recovery: {
+        candidates: stats.candidates,
+        sent: stats.sent,
+        converted: stats.converted,
+        conversionRatePct: stats.sent > 0 ? Number(((stats.converted / stats.sent) * 100).toFixed(2)) : 0,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudieron cargar estadísticas de recuperación.", detail: String(error && error.message || error) });
   }
 });
 
@@ -1197,6 +1439,8 @@ app.use(function errorHandler(err, req, res, _next) {
 let serverInstance = null;
 let hasMigrated = false;
 let poolClosed = false;
+let recoverySweepTimer = null;
+let recoverySweepRunning = false;
 
 async function startServer(options) {
   const opts = options && typeof options === "object" ? options : {};
@@ -1231,6 +1475,8 @@ async function startServer(options) {
     });
   });
 
+  startCheckoutRecoveryTimer();
+
   const address = serverInstance.address();
   return {
     app: app,
@@ -1242,6 +1488,8 @@ async function startServer(options) {
 }
 
 async function stopServer() {
+  stopCheckoutRecoveryTimer();
+
   if (serverInstance) {
     await new Promise(function closePromise(resolve, reject) {
       serverInstance.close(function onClose(error) {
@@ -1295,14 +1543,231 @@ async function deliverOTPEmail(email, code, expiresAt) {
   return "smtp";
 }
 
+async function deliverEmail(to, subject, text) {
+  if (!mailer) {
+    console.info("[dev-email] to=%s subject=%s", to, subject);
+    return "dev-log";
+  }
+  await mailer.sendMail({
+    from: CONFIG.smtpFrom,
+    to: to,
+    subject: subject,
+    text: text,
+  });
+  return "smtp";
+}
+
+function buildCheckoutRecoveryURL(sessionId, stripeSession) {
+  if (stripeSession && stripeSession.url) {
+    return String(stripeSession.url);
+  }
+  return CONFIG.appBaseURL + "/?checkout=resume&session_id=" + encodeURIComponent(sessionId);
+}
+
+async function sendCheckoutRecoveryEmail(candidate, checkoutURL) {
+  const email = String(candidate && candidate.email || "").trim().toLowerCase();
+  if (!email) {
+    throw createError("No hay email para recuperación.", 400);
+  }
+  const subject = "Tu compra en Simplify sigue pendiente";
+  const text = [
+    "Hola" + (candidate && candidate.name ? " " + String(candidate.name).trim() : "") + ",",
+    "",
+    "Vimos que dejaste una compra de créditos/suscripción sin completar.",
+    "Puedes retomarla desde este enlace seguro:",
+    checkoutURL,
+    "",
+    "Si ya completaste el pago, ignora este correo.",
+    "",
+    "Equipo Simplify",
+  ].join("\n");
+  return deliverEmail(email, subject, text);
+}
+
+function startCheckoutRecoveryTimer() {
+  if (recoverySweepTimer || !serverInstance) {
+    return;
+  }
+  const intervalMs = CONFIG.recoverySweepMinutes * 60 * 1000;
+  recoverySweepTimer = setInterval(function onRecoveryTick() {
+    runCheckoutRecoverySweep({
+      trigger: "interval",
+      limit: CONFIG.recoveryBatchSize,
+      force: false,
+      dryRun: false,
+    }).catch(function onError(error) {
+      logError("checkout.recovery.sweep.error", {
+        message: String(error && error.message || error),
+      });
+    });
+  }, intervalMs);
+  if (typeof recoverySweepTimer.unref === "function") {
+    recoverySweepTimer.unref();
+  }
+}
+
+function stopCheckoutRecoveryTimer() {
+  if (!recoverySweepTimer) {
+    return;
+  }
+  clearInterval(recoverySweepTimer);
+  recoverySweepTimer = null;
+}
+
+async function runCheckoutRecoverySweep(options) {
+  const opts = Object.assign({
+    trigger: "manual",
+    limit: CONFIG.recoveryBatchSize,
+    force: false,
+    dryRun: false,
+  }, options || {});
+
+  if (recoverySweepRunning) {
+    return {
+      trigger: opts.trigger,
+      skipped: true,
+      reason: "already-running",
+      candidates: 0,
+      emailed: 0,
+      reconciled: 0,
+      failed: 0,
+      dryRun: Boolean(opts.dryRun),
+    };
+  }
+
+  recoverySweepRunning = true;
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const candidateBeforeIso = new Date(now.getTime() - CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString();
+  const nextAttemptIso = new Date(now.getTime() + CONFIG.recoveryDelayMinutes * 60 * 1000).toISOString();
+
+  try {
+    const candidates = await withTransaction(async function tx(client) {
+      const rows = await client.query(
+        [
+          "SELECT",
+          "ps.session_id, ps.user_id, ps.customer_id, ps.plan_id, ps.created_at,",
+          "COALESCE(ps.recovery_attempts, 0)::int AS recovery_attempts,",
+          "ps.recovery_email_sent_at, ps.recovery_next_attempt_at,",
+          "u.email, u.name",
+          "FROM payment_sessions ps",
+          "LEFT JOIN app_users u ON u.id = ps.user_id",
+          "WHERE ps.status IN ('created','pending')",
+          "AND COALESCE(ps.recovery_attempts, 0) < $1",
+          "AND ps.created_at <= $2",
+          "AND (ps.recovery_next_attempt_at IS NULL OR ps.recovery_next_attempt_at <= $3)",
+          "ORDER BY ps.created_at ASC",
+          "LIMIT $4",
+        ].join(" "),
+        [CONFIG.recoveryMaxAttempts, candidateBeforeIso, nowIso, Math.max(1, Math.min(100, Number(opts.limit) || CONFIG.recoveryBatchSize))]
+      );
+      return rows.rows;
+    });
+
+    let reconciled = 0;
+    let emailed = 0;
+    let failed = 0;
+    let skippedNoEmail = 0;
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const candidate = candidates[i];
+      let stripeSession = null;
+      let checkoutURL = buildCheckoutRecoveryURL(candidate.session_id, null);
+
+      if (stripe) {
+        try {
+          stripeSession = await stripe.checkout.sessions.retrieve(candidate.session_id);
+          if (stripeSession && (stripeSession.payment_status === "paid" || stripeSession.status === "complete")) {
+            await withTransaction(async function tx(client) {
+              await processCheckoutCompleted(client, stripeSession);
+            });
+            reconciled += 1;
+            continue;
+          }
+          checkoutURL = buildCheckoutRecoveryURL(candidate.session_id, stripeSession);
+        } catch (_stripeError) {
+          // Fallback to app URL if Stripe cannot be read.
+          checkoutURL = buildCheckoutRecoveryURL(candidate.session_id, null);
+        }
+      }
+
+      if (!candidate.email) {
+        skippedNoEmail += 1;
+        await withTransaction(async function tx(client) {
+          await client.query(
+            "UPDATE payment_sessions SET recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = $2, recovery_next_attempt_at = $3, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, "email-missing", nextAttemptIso]
+          );
+          await recordEvent(client, "checkout_recovery_skipped", candidate.user_id || null, candidate.customer_id || null, {
+            sessionId: candidate.session_id,
+            reason: "email-missing",
+            trigger: opts.trigger,
+          });
+        });
+        continue;
+      }
+
+      if (opts.dryRun) {
+        continue;
+      }
+
+      try {
+        const delivery = await sendCheckoutRecoveryEmail(candidate, checkoutURL);
+        emailed += 1;
+        await withTransaction(async function tx(client) {
+          await client.query(
+            "UPDATE payment_sessions SET status = 'pending', recovery_email_sent_at = NOW(), recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = NULL, recovery_next_attempt_at = $2, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, nextAttemptIso]
+          );
+          await recordEvent(client, "checkout_recovery_email_sent", candidate.user_id || null, candidate.customer_id || null, {
+            sessionId: candidate.session_id,
+            planId: candidate.plan_id || "",
+            delivery: delivery,
+            trigger: opts.trigger,
+          });
+        });
+      } catch (error) {
+        failed += 1;
+        await withTransaction(async function tx(client) {
+          await client.query(
+            "UPDATE payment_sessions SET recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = $2, recovery_next_attempt_at = $3, updated_at = NOW() WHERE session_id = $1",
+            [candidate.session_id, String(error && error.message || error).slice(0, 180), nextAttemptIso]
+          );
+          await recordEvent(client, "checkout_recovery_email_failed", candidate.user_id || null, candidate.customer_id || null, {
+            sessionId: candidate.session_id,
+            reason: String(error && error.message || error).slice(0, 180),
+            trigger: opts.trigger,
+          });
+        });
+      }
+    }
+
+    return {
+      trigger: opts.trigger,
+      skipped: false,
+      dryRun: Boolean(opts.dryRun),
+      candidates: candidates.length,
+      emailed: emailed,
+      reconciled: reconciled,
+      failed: failed,
+      skippedNoEmail: skippedNoEmail,
+    };
+  } finally {
+    recoverySweepRunning = false;
+  }
+}
+
 function publicPlans() {
   return Object.keys(PLAN_CONFIG).reduce(function reducePlans(acc, key) {
     const plan = PLAN_CONFIG[key];
+    const planTier = mapPlanIdToTier(plan.id);
     acc[key] = {
       id: plan.id,
       label: plan.label,
       mode: plan.mode,
+      tier: planTier,
       credits: plan.credits,
+      limits: getPlanLimitsForTier(planTier),
       amountCents: plan.unitAmountCents,
       currency: CONFIG.priceCurrency,
       stripePriceIdConfigured: Boolean(plan.stripePriceId),
@@ -1425,10 +1890,11 @@ async function runMigrations() {
     "CREATE TABLE IF NOT EXISTS app_users (id TEXT PRIMARY KEY, customer_id TEXT UNIQUE NOT NULL, email TEXT UNIQUE, name TEXT, role TEXT NOT NULL DEFAULT 'user', provider TEXT NOT NULL DEFAULT 'anonymous', google_sub TEXT UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE INDEX IF NOT EXISTS idx_app_users_customer_id ON app_users(customer_id)",
     "CREATE INDEX IF NOT EXISTS idx_app_users_email ON app_users(email)",
-    "CREATE TABLE IF NOT EXISTS user_credits (user_id TEXT PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE, credits INTEGER NOT NULL DEFAULT 0 CHECK (credits >= 0), free_used INTEGER NOT NULL DEFAULT 0 CHECK (free_used >= 0), free_uses INTEGER NOT NULL DEFAULT 3 CHECK (free_uses >= 0), total_purchased INTEGER NOT NULL DEFAULT 0 CHECK (total_purchased >= 0), total_consumed INTEGER NOT NULL DEFAULT 0 CHECK (total_consumed >= 0), subscription_active BOOLEAN NOT NULL DEFAULT FALSE, subscription_credits_cycle INTEGER NOT NULL DEFAULT 250 CHECK (subscription_credits_cycle >= 0), stripe_customer_id TEXT UNIQUE, stripe_subscription_id TEXT UNIQUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE TABLE IF NOT EXISTS payment_sessions (session_id TEXT PRIMARY KEY, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, customer_id TEXT NOT NULL, plan_id TEXT NOT NULL, status TEXT NOT NULL, amount_total INTEGER, currency TEXT NOT NULL, credits_granted INTEGER NOT NULL DEFAULT 0, granted BOOLEAN NOT NULL DEFAULT FALSE, stripe_customer_id TEXT, stripe_subscription_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS user_credits (user_id TEXT PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE, credits INTEGER NOT NULL DEFAULT 0 CHECK (credits >= 0), free_used INTEGER NOT NULL DEFAULT 0 CHECK (free_used >= 0), free_uses INTEGER NOT NULL DEFAULT 3 CHECK (free_uses >= 0), total_purchased INTEGER NOT NULL DEFAULT 0 CHECK (total_purchased >= 0), total_consumed INTEGER NOT NULL DEFAULT 0 CHECK (total_consumed >= 0), subscription_active BOOLEAN NOT NULL DEFAULT FALSE, subscription_credits_cycle INTEGER NOT NULL DEFAULT 250 CHECK (subscription_credits_cycle >= 0), plan_tier TEXT NOT NULL DEFAULT 'free', stripe_customer_id TEXT UNIQUE, stripe_subscription_id TEXT UNIQUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS payment_sessions (session_id TEXT PRIMARY KEY, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, customer_id TEXT NOT NULL, plan_id TEXT NOT NULL, status TEXT NOT NULL, amount_total INTEGER, currency TEXT NOT NULL, credits_granted INTEGER NOT NULL DEFAULT 0, granted BOOLEAN NOT NULL DEFAULT FALSE, stripe_customer_id TEXT, stripe_subscription_id TEXT, recovery_attempts INTEGER NOT NULL DEFAULT 0, recovery_email_sent_at TIMESTAMPTZ, recovery_next_attempt_at TIMESTAMPTZ, recovery_last_error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE INDEX IF NOT EXISTS idx_payment_sessions_user ON payment_sessions(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_payment_sessions_status ON payment_sessions(status)",
+    "CREATE INDEX IF NOT EXISTS idx_payment_sessions_recovery_next_attempt ON payment_sessions(recovery_next_attempt_at)",
     "CREATE TABLE IF NOT EXISTS processed_invoices (invoice_id TEXT PRIMARY KEY, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS webhook_events (event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, payload JSONB NOT NULL, processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS email_login_codes (email TEXT PRIMARY KEY, code_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
@@ -1438,10 +1904,24 @@ async function runMigrations() {
     "CREATE TABLE IF NOT EXISTS legal_consents (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE, customer_id TEXT NOT NULL, version TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'web', accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), user_agent TEXT, ip_hash TEXT)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_consents_user_version ON legal_consents(user_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_legal_consents_customer_version ON legal_consents(customer_id, version)",
+    "CREATE TABLE IF NOT EXISTS marketing_costs (id BIGSERIAL PRIMARY KEY, channel TEXT NOT NULL, amount_cents BIGINT NOT NULL CHECK (amount_cents >= 0), spent_at TIMESTAMPTZ NOT NULL, note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE INDEX IF NOT EXISTS idx_marketing_costs_spent_at ON marketing_costs(spent_at)",
+    "ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS plan_tier TEXT NOT NULL DEFAULT 'free'",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_attempts INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_email_sent_at TIMESTAMPTZ",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_next_attempt_at TIMESTAMPTZ",
+    "ALTER TABLE payment_sessions ADD COLUMN IF NOT EXISTS recovery_last_error TEXT",
   ];
 
   for (let i = 0; i < ddl.length; i += 1) {
-    await pool.query(ddl[i]);
+    try {
+      await pool.query(ddl[i]);
+    } catch (error) {
+      if (isIgnorableMigrationError(error, ddl[i])) {
+        continue;
+      }
+      throw error;
+    }
   }
 }
 
@@ -1464,7 +1944,7 @@ const USER_SELECT = [
   "SELECT",
   "u.id, u.customer_id, u.email, u.name, u.role, u.provider, u.google_sub, u.created_at, u.updated_at,",
   "c.credits, c.free_used, c.free_uses, c.total_purchased, c.total_consumed, c.subscription_active,",
-  "c.subscription_credits_cycle, c.stripe_customer_id, c.stripe_subscription_id, c.updated_at AS credits_updated_at",
+  "c.subscription_credits_cycle, c.plan_tier, c.stripe_customer_id, c.stripe_subscription_id, c.updated_at AS credits_updated_at",
   "FROM app_users u",
   "JOIN user_credits c ON c.user_id = u.id",
 ].join(" ");
@@ -1516,7 +1996,7 @@ async function ensureUserByCustomerId(client, rawCustomerId) {
     [userId, customerId]
   );
   await client.query(
-    "INSERT INTO user_credits (user_id, credits, free_used, free_uses, total_purchased, total_consumed, subscription_active, subscription_credits_cycle, updated_at) VALUES ($1,0,0,$2,0,0,false,$3,NOW())",
+    "INSERT INTO user_credits (user_id, credits, free_used, free_uses, total_purchased, total_consumed, subscription_active, subscription_credits_cycle, plan_tier, updated_at) VALUES ($1,0,0,$2,0,0,false,$3,'free',NOW())",
     [userId, CONFIG.freeUses, CONFIG.creditSubMonth]
   );
 
@@ -1581,6 +2061,11 @@ async function mergeUsers(client, sourceUserId, targetUserId) {
       "WHERE t.user_id = $1 AND s.user_id = $2",
     ].join(" "),
     [targetUserId, sourceUserId]
+  );
+  const mergedTier = chooseHigherPlanTier(target.plan_tier, source.plan_tier, Boolean(target.subscription_active || source.subscription_active));
+  await client.query(
+    "UPDATE user_credits SET plan_tier = $2, updated_at = NOW() WHERE user_id = $1",
+    [targetUserId, mergedTier]
   );
 
   await client.query("UPDATE payment_sessions SET user_id = $1, customer_id = $2, updated_at = NOW() WHERE user_id = $3", [
@@ -1698,9 +2183,11 @@ async function processCheckoutCompleted(client, session) {
   const existingPayment = await client.query("SELECT granted FROM payment_sessions WHERE session_id = $1", [session.id]);
   const alreadyGranted = existingPayment.rowCount > 0 && Boolean(existingPayment.rows[0].granted);
   const grantedFlag = alreadyGranted || creditsGranted > 0;
+  const purchasedTier = normalizePlanTier(mapPlanIdToTier(metadataPlan)) || "free";
+  const finalTier = chooseHigherPlanTier(user.plan_tier, purchasedTier, Boolean(user.subscription_active || session.subscription));
 
   await client.query(
-    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'completed',$5,$6,$7,$8,$9,$10,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, amount_total = EXCLUDED.amount_total, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, granted = EXCLUDED.granted, stripe_customer_id = EXCLUDED.stripe_customer_id, stripe_subscription_id = EXCLUDED.stripe_subscription_id, updated_at = NOW()",
+    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, stripe_customer_id, stripe_subscription_id, recovery_last_error, recovery_next_attempt_at, created_at, updated_at) VALUES ($1,$2,$3,$4,'completed',$5,$6,$7,$8,$9,$10,NULL,NULL,NOW(),NOW()) ON CONFLICT (session_id) DO UPDATE SET user_id = EXCLUDED.user_id, customer_id = EXCLUDED.customer_id, plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, amount_total = EXCLUDED.amount_total, currency = EXCLUDED.currency, credits_granted = EXCLUDED.credits_granted, granted = EXCLUDED.granted, stripe_customer_id = EXCLUDED.stripe_customer_id, stripe_subscription_id = EXCLUDED.stripe_subscription_id, recovery_last_error = NULL, recovery_next_attempt_at = NULL, updated_at = NOW()",
     [
       session.id,
       user.id,
@@ -1717,8 +2204,13 @@ async function processCheckoutCompleted(client, session) {
 
   if (session.customer || session.subscription) {
     await client.query(
-      "UPDATE user_credits SET stripe_customer_id = COALESCE($2, stripe_customer_id), stripe_subscription_id = COALESCE($3, stripe_subscription_id), subscription_active = CASE WHEN $3 IS NULL THEN subscription_active ELSE true END, subscription_credits_cycle = CASE WHEN $4 > 0 THEN $4 ELSE subscription_credits_cycle END, updated_at = NOW() WHERE user_id = $1",
-      [user.id, session.customer || null, session.subscription || null, creditsGranted]
+      "UPDATE user_credits SET stripe_customer_id = COALESCE($2, stripe_customer_id), stripe_subscription_id = COALESCE($3, stripe_subscription_id), subscription_active = CASE WHEN $3 IS NULL THEN subscription_active ELSE true END, subscription_credits_cycle = CASE WHEN $4 > 0 THEN $4 ELSE subscription_credits_cycle END, plan_tier = $5, updated_at = NOW() WHERE user_id = $1",
+      [user.id, session.customer || null, session.subscription || null, creditsGranted, finalTier]
+    );
+  } else {
+    await client.query(
+      "UPDATE user_credits SET plan_tier = $2, updated_at = NOW() WHERE user_id = $1",
+      [user.id, finalTier]
     );
   }
 
@@ -1732,6 +2224,7 @@ async function processCheckoutCompleted(client, session) {
   await recordEvent(client, "checkout_session_completed", user.id, user.customer_id, {
     sessionId: session.id,
     plan: metadataPlan || "",
+    planTier: finalTier,
     creditsGranted: creditsGranted,
   });
 }
@@ -1763,7 +2256,7 @@ async function processInvoicePaid(client, invoice) {
   );
 
   await client.query(
-    "UPDATE user_credits SET subscription_active = true, updated_at = NOW() WHERE user_id = $1",
+    "UPDATE user_credits SET subscription_active = true, plan_tier = 'sub', updated_at = NOW() WHERE user_id = $1",
     [user.id]
   );
 
@@ -1792,7 +2285,7 @@ async function processSubscriptionUpdated(client, subscription) {
     return;
   }
   await client.query(
-    "UPDATE user_credits SET subscription_active = $2, updated_at = NOW() WHERE user_id = $1",
+    "UPDATE user_credits SET subscription_active = $2, plan_tier = CASE WHEN $2 THEN 'sub' ELSE CASE WHEN plan_tier = 'sub' THEN 'free' ELSE plan_tier END END, updated_at = NOW() WHERE user_id = $1",
     [user.id, active]
   );
   await recordEvent(client, "subscription_updated", user.id, user.customer_id, {
@@ -1812,7 +2305,7 @@ async function processSubscriptionDeleted(client, subscription) {
     return;
   }
   await client.query(
-    "UPDATE user_credits SET subscription_active = false, updated_at = NOW() WHERE user_id = $1",
+    "UPDATE user_credits SET subscription_active = false, plan_tier = CASE WHEN plan_tier = 'sub' THEN 'free' ELSE plan_tier END, updated_at = NOW() WHERE user_id = $1",
     [user.id]
   );
   await recordEvent(client, "subscription_deleted", user.id, user.customer_id, {
@@ -1914,11 +2407,15 @@ function buildBalancePayload(user) {
   const freeUses = Number(user.free_uses || CONFIG.freeUses);
   const freeUsed = Number(user.free_used || 0);
   const freeLeft = Math.max(0, freeUses - freeUsed);
+  const planTier = getEffectivePlanTier(user);
+  const limits = getPlanLimitsForTier(planTier);
   return {
     credits: Math.max(0, Number(user.credits || 0)),
     freeUses: freeUses,
     freeUsed: freeUsed,
     freeLeft: freeLeft,
+    planTier: planTier,
+    limits: limits,
     totalPurchased: Math.max(0, Number(user.total_purchased || 0)),
     totalConsumed: Math.max(0, Number(user.total_consumed || 0)),
     subscriptionActive: Boolean(user.subscription_active),
@@ -1969,6 +2466,53 @@ function normalizeLegalSource(value) {
     .replace(/[^a-z0-9._-]/g, "")
     .slice(0, 64);
   return normalized || "";
+}
+
+function normalizePlanTier(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "free" || normalized === "one" || normalized === "pack" || normalized === "sub") {
+    return normalized;
+  }
+  return "";
+}
+
+function mapPlanIdToTier(planId) {
+  const normalized = String(planId || "").trim().toLowerCase();
+  if (normalized === "one" || normalized === "pack" || normalized === "sub") {
+    return normalized;
+  }
+  return "free";
+}
+
+function chooseHigherPlanTier(currentTier, incomingTier, forceSubscription) {
+  if (forceSubscription) {
+    return "sub";
+  }
+  const current = normalizePlanTier(currentTier) || "free";
+  const incoming = normalizePlanTier(incomingTier) || "free";
+  const currentOrder = Number(PLAN_TIER_ORDER[current] || 0);
+  const incomingOrder = Number(PLAN_TIER_ORDER[incoming] || 0);
+  return incomingOrder > currentOrder ? incoming : current;
+}
+
+function getEffectivePlanTier(user) {
+  if (user && Boolean(user.subscription_active)) {
+    return "sub";
+  }
+  return normalizePlanTier(user && user.plan_tier) || "free";
+}
+
+function getPlanLimitsForTier(planTier) {
+  const normalized = normalizePlanTier(planTier) || "free";
+  return PLAN_LIMITS[normalized] || PLAN_LIMITS.free;
+}
+
+function normalizeMarketingChannel(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "")
+    .slice(0, 40);
 }
 
 function hashForStorage(value) {
@@ -2131,6 +2675,21 @@ function readNumber(name, fallback) {
   const raw = process.env[name];
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isIgnorableMigrationError(error, statement) {
+  const sql = String(statement || "").trim().toLowerCase();
+  const message = String(error && error.message || "").toLowerCase();
+  if (!sql.startsWith("alter table")) {
+    return false;
+  }
+  if (message.includes("already exists") || message.includes("duplicate column")) {
+    return true;
+  }
+  if (message.includes("syntax") && message.includes("if not exists")) {
+    return true;
+  }
+  return false;
 }
 
 function toPositiveInt(value, fallback) {

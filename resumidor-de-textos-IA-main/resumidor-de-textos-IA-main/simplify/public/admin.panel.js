@@ -46,8 +46,11 @@
     var metricsButton = document.getElementById("btn-admin-metrics");
     var reconcileButton = document.getElementById("btn-admin-reconcile");
     var grantButton = document.getElementById("btn-admin-grant");
+    var assignPlanButton = document.getElementById("btn-admin-assign-plan");
+    var recoveryRunButton = document.getElementById("btn-admin-recovery-run");
     var targetCustomerInput = document.getElementById("admin-target-customer");
     var grantCreditsInput = document.getElementById("admin-grant-credits");
+    var planTierSelect = document.getElementById("admin-plan-tier");
     var output = document.getElementById("admin-output");
 
     if (!panel || !metricsButton || !reconcileButton || !grantButton || !output) {
@@ -145,9 +148,65 @@
       });
     }
 
+    function assignPlan() {
+      var path = toNonEmptyString(monetization.adminAssignPlanPath || "/api/admin/plan/assign");
+      var url = apiBase + (path.charAt(0) === "/" ? path : "/" + path);
+      var customerId = targetCustomerInput ? toNonEmptyString(targetCustomerInput.value) : "";
+      var planTier = planTierSelect ? toNonEmptyString(planTierSelect.value) : "";
+      if (!customerId) {
+        setOutput({ error: "Debes indicar customerId para asignar plan." });
+        return;
+      }
+      if (!planTier) {
+        setOutput({ error: "Debes seleccionar un plan válido." });
+        return;
+      }
+      if (!assignPlanButton) {
+        return;
+      }
+
+      setBusy(assignPlanButton, true);
+      fetchJSON(url, {
+        method: "POST",
+        headers: makeHeaders(),
+        body: JSON.stringify({
+          customerId: customerId,
+          planTier: planTier,
+        }),
+      }).then(setOutput).catch(function (error) {
+        setOutput({ error: error && error.message ? error.message : "No se pudo asignar plan." });
+      }).finally(function () {
+        setBusy(assignPlanButton, false);
+      });
+    }
+
+    function runRecoverySweep() {
+      var path = toNonEmptyString(monetization.adminRecoveryRunPath || "/api/admin/recovery/checkout/run");
+      var url = apiBase + (path.charAt(0) === "/" ? path : "/" + path);
+      if (!recoveryRunButton) {
+        return;
+      }
+      setBusy(recoveryRunButton, true);
+      fetchJSON(url, {
+        method: "POST",
+        headers: makeHeaders(),
+        body: JSON.stringify({ limit: 25 }),
+      }).then(setOutput).catch(function (error) {
+        setOutput({ error: error && error.message ? error.message : "No se pudo ejecutar recuperación." });
+      }).finally(function () {
+        setBusy(recoveryRunButton, false);
+      });
+    }
+
     metricsButton.addEventListener("click", loadMetrics);
     reconcileButton.addEventListener("click", reconcile);
     grantButton.addEventListener("click", grantCredits);
+    if (assignPlanButton) {
+      assignPlanButton.addEventListener("click", assignPlan);
+    }
+    if (recoveryRunButton) {
+      recoveryRunButton.addEventListener("click", runRecoverySweep);
+    }
 
     function applyVisibility() {
       panel.hidden = !shouldShowPanel();

@@ -315,6 +315,27 @@ async function installApiMocks(page, options = {}) {
       return;
     }
 
+    if (path === "/api/admin/plan/assign") {
+      await fulfillJSON(route, 200, {
+        ok: true,
+        planTier: payload.planTier || "pack",
+        user: state.adminUser,
+      });
+      return;
+    }
+
+    if (path === "/api/admin/recovery/checkout/run") {
+      await fulfillJSON(route, 200, {
+        ok: true,
+        trigger: "admin",
+        candidates: 3,
+        emailed: 2,
+        reconciled: 1,
+        failed: 0,
+      });
+      return;
+    }
+
     await fulfillJSON(route, 404, { error: "Unhandled mock path: " + path });
   }
 
@@ -367,6 +388,13 @@ test("admin tools and checkout flow work with mocked APIs", async ({ page }) => 
   await page.fill("#admin-grant-credits", "10");
   await page.click("#btn-admin-grant");
   await expect(page.locator("#admin-output")).toContainText("\"granted\": 10");
+
+  await page.selectOption("#admin-plan-tier", "sub");
+  await page.click("#btn-admin-assign-plan");
+  await expect(page.locator("#admin-output")).toContainText("\"planTier\": \"sub\"");
+
+  await page.click("#btn-admin-recovery-run");
+  await expect(page.locator("#admin-output")).toContainText("\"emailed\": 2");
 
   await page.check("#legal-consent");
   await page.click("#pay-one");

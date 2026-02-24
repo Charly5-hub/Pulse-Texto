@@ -16,11 +16,13 @@ Aplicación de transformación de texto con enfoque productivo (2026): UX rápid
 - Backend Node.js + Postgres con:
   - generación IA server-side (`/api/ai/generate`) con control de cuota segura,
   - prompt hardening por estilo narrativo + control de temperatura por estilo,
+  - límites por plan/tier (free/one/pack/sub) en tamaño de input,
   - Stripe Checkout + webhook idempotente,
+  - recuperación de checkout abandonado por email (sweep automático + trigger admin),
   - ledger de créditos en PostgreSQL,
   - auth JWT (anónimo, email OTP, Google),
   - consentimiento legal versionado (`/api/legal/*`),
-  - eventos de producto y métricas admin.
+  - eventos de producto y métricas admin (incluye LTV/CAC y recuperación de checkout).
 
 ## Estructura
 
@@ -130,6 +132,7 @@ Opcionales importantes:
 - SMTP (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`)
 - precios y créditos (`PRICE_*`, `CREDIT_*`, `FREE_USES`)
 - legal/compliance (`LEGAL_VERSION`, `LEGAL_REQUIRE_CHECKOUT_CONSENT`)
+- unit economics / retention (`MARKETING_SPEND_MONTHLY_CENTS`, `RECOVERY_*`, `MAX_INPUT_*`)
 
 ## Endpoints principales
 
@@ -161,6 +164,10 @@ Opcionales importantes:
 - `GET /api/admin/metrics`
 - `POST /api/admin/reconcile/payments`
 - `POST /api/admin/credits/grant`
+- `POST /api/admin/plan/assign`
+- `POST /api/admin/marketing/spend`
+- `POST /api/admin/recovery/checkout/run`
+- `GET /api/admin/recovery/checkout/stats`
 
 ## Webhook Stripe en local
 
@@ -227,8 +234,10 @@ psql "$DATABASE_URL" -f backend/sql/dashboard_queries.sql
 - Claves de IA y Stripe se mantienen en backend.
 - Webhook Stripe es idempotente por `event_id` en DB.
 - El consumo de cuota para IA se valida server-side (free uses + créditos).
+- La generación IA aplica límites por plan/tier para proteger coste y experiencia.
 - Checkout exige consentimiento legal versionado antes de cobro.
 - Retorno de pago usa conciliación por `session_id` para reducir fricción por latencia webhook.
+- Recuperación de checkout abandonado por email (con límite de intentos y trazabilidad de eventos).
 - Admin protegido por `x-admin-key` o rol `admin` en JWT.
 - Rate limiting anti-abuso por IP/usuario en auth, IA, eventos, checkout y admin.
 - Headers de seguridad en backend (nosniff, frame deny, referrer, permissions, COOP/CORP, HSTS bajo HTTPS).

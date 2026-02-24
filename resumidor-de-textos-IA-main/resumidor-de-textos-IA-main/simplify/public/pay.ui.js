@@ -27,18 +27,19 @@
     if (!badge || !state) {
       return;
     }
+    var tierSuffix = state.planTier ? (" · plan " + state.planTier) : "";
 
     if (state.bypass) {
-      badge.textContent = "∞";
+      badge.textContent = "∞" + tierSuffix;
       return;
     }
 
     if (state.paidCredits > 0) {
-      badge.textContent = String(state.freeLeft) + "/" + String(state.freeUses) + " + " + String(state.paidCredits) + " créditos";
+      badge.textContent = String(state.freeLeft) + "/" + String(state.freeUses) + " + " + String(state.paidCredits) + " créditos" + tierSuffix;
       return;
     }
 
-    badge.textContent = String(state.freeLeft) + "/" + String(state.freeUses);
+    badge.textContent = String(state.freeLeft) + "/" + String(state.freeUses) + tierSuffix;
   }
 
   function findOrCreateStatusNode() {

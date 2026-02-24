@@ -10,6 +10,7 @@ let backend = null;
 let apiBase = "";
 let authToken = "";
 let customerId = "";
+let userId = "";
 let openaiMockServer = null;
 let openaiPort = 0;
 let lastOpenaiPayload = null;
@@ -106,6 +107,28 @@ async function requestJSON(method, path, body, extraHeaders = {}) {
   return parsed;
 }
 
+async function requestRaw(method, path, body, extraHeaders = {}) {
+  const headers = Object.assign(
+    { "Content-Type": "application/json" },
+    extraHeaders || {}
+  );
+  const options = {
+    method,
+    headers,
+  };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(apiBase + path, options);
+  const raw = await response.text();
+  const parsed = raw ? JSON.parse(raw) : {};
+  return {
+    status: response.status,
+    ok: response.ok,
+    body: parsed,
+  };
+}
+
 test("anonymous session and email OTP login", async () => {
   const anonymous = await requestJSON("POST", "/api/auth/session/anonymous", {
     customerId: "cust_testsuite_e2e",
@@ -138,6 +161,7 @@ test("anonymous session and email OTP login", async () => {
   assert.equal(verified.user.provider, "email");
 
   authToken = verified.token;
+  userId = verified.user.id;
 });
 
 test("legal consent can be recorded and consulted", async () => {
@@ -249,6 +273,83 @@ test("admin can grant credits and user can consume them", async () => {
   assert.equal(Number(consumed.balance.credits), 3);
 });
 
+test("plan limits are enforced and can be upgraded by admin", async () => {
+  const longInput = "a".repeat(9000);
+
+  const blocked = await requestRaw(
+    "POST",
+    "/api/ai/generate",
+    {
+      input: longInput,
+      style: "neutral",
+      metadata: { customerId },
+    },
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(blocked.status, 413);
+  assert.ok(String(blocked.body.error || "").includes("límite de tu plan"));
+
+  const assigned = await requestJSON(
+    "POST",
+    "/api/admin/plan/assign",
+    {
+      customerId,
+      planTier: "pack",
+    },
+    { "x-admin-key": "test-admin-key" }
+  );
+  assert.equal(assigned.ok, true);
+  assert.equal(assigned.planTier, "pack");
+
+  const allowed = await requestJSON(
+    "POST",
+    "/api/ai/generate",
+    {
+      input: longInput,
+      style: "technical",
+      metadata: { customerId },
+    },
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.ok(allowed.output.includes("Salida IA de prueba"));
+  assert.equal(allowed.planTier, "pack");
+});
+
+test("checkout recovery sweep processes pending sessions", async () => {
+  await backend.pool.query(
+    "INSERT INTO payment_sessions (session_id, user_id, customer_id, plan_id, status, amount_total, currency, credits_granted, granted, recovery_attempts, created_at, updated_at) VALUES ($1,$2,$3,$4,'created',NULL,$5,$6,false,0,$7,$8)",
+    [
+      "cs_recovery_test_001",
+      userId,
+      customerId,
+      "pack",
+      "eur",
+      10,
+      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      new Date().toISOString(),
+    ]
+  );
+
+  const run = await requestJSON(
+    "POST",
+    "/api/admin/recovery/checkout/run",
+    {
+      limit: 20,
+    },
+    { "x-admin-key": "test-admin-key" }
+  );
+  assert.equal(run.ok, true);
+  assert.ok(run.candidates >= 1);
+  assert.ok(run.emailed >= 1 || run.reconciled >= 1);
+
+  const row = await backend.pool.query(
+    "SELECT recovery_attempts, recovery_email_sent_at FROM payment_sessions WHERE session_id = $1",
+    ["cs_recovery_test_001"]
+  );
+  assert.equal(row.rowCount, 1);
+  assert.ok(Number(row.rows[0].recovery_attempts || 0) >= 1);
+});
+
 test("admin metrics endpoint returns kpis and funnel", async () => {
   const metrics = await requestJSON(
     "GET",
@@ -260,6 +361,8 @@ test("admin metrics endpoint returns kpis and funnel", async () => {
   assert.equal(metrics.ok, true);
   assert.ok(metrics.kpis.totalUsers >= 1);
   assert.ok(typeof metrics.funnel.generationCompleted === "number");
+  assert.ok(typeof metrics.unitEconomics.ltvCacRatio === "number");
+  assert.ok(typeof metrics.checkoutRecovery.conversionRatePct === "number");
   assert.ok(Array.isArray(metrics.events));
   assert.ok(Array.isArray(metrics.dailyEvents));
 });
