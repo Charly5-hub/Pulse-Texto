@@ -3,6 +3,8 @@ __pycache__/
 .DS_Store
 backend/node_modules/
 backend/.env
+backend/playwright-report/
+backend/test-results/
 backend/data/ledger.json
 backend/data/events.ndjson
 .env.compose

@@ -178,6 +178,27 @@ Cobertura actual del flujo:
 - acreditación admin y consumo de créditos,
 - métricas admin.
 
+## Tests E2E frontend (Playwright)
+
+La UI crítica (transformación, auth OTP, admin y checkout mock) está cubierta con Playwright:
+
+```bash
+cd backend
+npm run test:ui
+```
+
+Suite incluida:
+- `backend/tests/ui/app.critical-flows.spec.mjs`
+- mocks de API para flujos de frontend sin depender de servicios externos.
+
+## CI (GitHub Actions)
+
+Pipeline en `.github/workflows/ci.yml` con:
+- checks backend (`npm run check`),
+- tests API E2E (`npm test`),
+- validación estática (`python3 scripts/validate_static.py` + `node --check`),
+- tests UI Playwright (instala Chromium y ejecuta `npm run test:ui`).
+
 ## SQL útil (seed + BI)
 
 ```bash
@@ -195,3 +216,5 @@ psql "$DATABASE_URL" -f backend/sql/dashboard_queries.sql
 - El consumo de cuota para IA se valida server-side (free uses + créditos).
 - Admin protegido por `x-admin-key` o rol `admin` en JWT.
 - Rate limiting anti-abuso por IP/usuario en auth, IA, eventos, checkout y admin.
+- Headers de seguridad en backend (nosniff, frame deny, referrer, permissions, COOP/CORP, HSTS bajo HTTPS).
+- Trazabilidad por request con `x-request-id` y logs estructurados JSON.

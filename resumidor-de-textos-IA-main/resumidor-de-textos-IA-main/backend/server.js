@@ -179,6 +179,11 @@ const RATE_LIMITERS = {
   }),
 };
 
+app.disable("x-powered-by");
+app.set("trust proxy", true);
+app.use(requestContextMiddleware);
+app.use(securityHeadersMiddleware);
+
 app.use(cors({
   origin: function originValidator(origin, callback) {
     if (!origin || ALLOW_ANY_ORIGIN || CONFIG.frontendOrigins.includes(origin)) {
@@ -935,8 +940,18 @@ app.post("/api/admin/reconcile/payments", requireAdmin, RATE_LIMITERS.adminWrite
   }
 });
 
-app.use(function errorHandler(err, _req, res, _next) {
-  res.status(500).json({ error: "Error interno.", detail: String(err && err.message || err) });
+app.use(function errorHandler(err, req, res, _next) {
+  logError("request.error", {
+    requestId: req && req.requestId ? req.requestId : null,
+    method: req && req.method ? req.method : null,
+    path: req && req.originalUrl ? req.originalUrl : null,
+    message: String(err && err.message || err),
+  });
+  res.status(500).json({
+    error: "Error interno.",
+    detail: String(err && err.message || err),
+    requestId: req && req.requestId ? req.requestId : null,
+  });
 });
 
 let serverInstance = null;
@@ -1692,6 +1707,76 @@ function createError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+function requestContextMiddleware(req, res, next) {
+  var incoming = String(req && req.headers && req.headers["x-request-id"] || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]/g, "")
+    .slice(0, 128);
+  var requestId = incoming || crypto.randomUUID();
+  req.requestId = requestId;
+
+  var startTime = process.hrtime.bigint();
+  res.setHeader("x-request-id", requestId);
+
+  res.on("finish", function onFinish() {
+    var durationMs = Number(process.hrtime.bigint() - startTime) / 1e6;
+    logInfo("request.completed", {
+      requestId: requestId,
+      method: req.method,
+      path: req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs: Number(durationMs.toFixed(2)),
+    });
+  });
+
+  next();
+}
+
+function securityHeadersMiddleware(req, res, next) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), interest-cohort=()");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-site");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  if (isHttpsRequest(req)) {
+    res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+  }
+  next();
+}
+
+function isHttpsRequest(req) {
+  if (!req) {
+    return false;
+  }
+  if (req.secure) {
+    return true;
+  }
+  var forwardedProto = String(req.headers && req.headers["x-forwarded-proto"] || "").toLowerCase();
+  return forwardedProto.split(",")[0].trim() === "https";
+}
+
+function logInfo(event, payload) {
+  logStructured("info", event, payload);
+}
+
+function logError(event, payload) {
+  logStructured("error", event, payload);
+}
+
+function logStructured(level, event, payload) {
+  var record = Object.assign({
+    ts: new Date().toISOString(),
+    level: level,
+    event: event,
+  }, payload || {});
+  try {
+    console.log(JSON.stringify(record));
+  } catch (_error) {
+    console.log("[log-fallback]", level, event);
+  }
 }
 
 function readNumber(name, fallback) {
