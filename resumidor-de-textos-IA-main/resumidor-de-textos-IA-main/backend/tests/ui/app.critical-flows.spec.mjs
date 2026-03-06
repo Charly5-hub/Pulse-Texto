@@ -402,3 +402,20 @@ test("admin tools and checkout flow work with mocked APIs", async ({ page }) => 
   await page.waitForTimeout(350);
   await expect(page.locator("#pay-status")).toContainText("Créditos actualizados");
 });
+
+test("checkout is blocked when legal consent is missing", async ({ page }) => {
+  await installApiMocks(page, { initialCredits: 2 });
+  await page.goto("/");
+
+  await expect(page.locator("#legal-consent")).not.toBeChecked();
+  await page.click("#pay-one");
+
+  await expect(page.locator("#pay-status")).toContainText("Debes aceptar Términos y Privacidad");
+  await expect(page).not.toHaveURL(/checkout=success/);
+});
+
+test("admin panel stays hidden without admin mode", async ({ page }) => {
+  await installApiMocks(page);
+  await page.goto("/");
+  await expect(page.locator("#admin-panel")).toBeHidden();
+});
