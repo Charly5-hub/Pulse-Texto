@@ -1,10 +1,37 @@
+# === Python ===
 __pycache__/
 *.pyc
+
+# === Sistema operativo / editores ===
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Node.js ===
 backend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# === Entorno y secretos locales ===
 backend/.env
+.env.compose
+
+# === Artefactos de test / cobertura ===
 backend/playwright-report/
 backend/test-results/
+coverage/
+.nyc_output/
+
+# === Datos runtime locales ===
 backend/data/ledger.json
 backend/data/events.ndjson
-.env.compose
+backend/data/*.tmp
+backend/data/*.bak
+
+# === Temporales generales ===
+*.tmp
+*.bak

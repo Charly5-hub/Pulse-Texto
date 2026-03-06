@@ -249,14 +249,16 @@ Referencia principal: `backend/.env.example`.
 ```text
 .
 ├── README.md
-├── ARCHITECTURE_ANALYSIS.md
 ├── docker-compose.yml
 ├── .env.compose.example
 ├── scripts/
 │   └── validate_static.py
 ├── docs/
 │   ├── PRODUCTION_GO_LIVE_CHECKLIST.md
-│   └── nginx-security.conf
+│   ├── nginx-security.conf
+│   └── reports/
+│       ├── ARCHITECTURE_ANALYSIS.md
+│       └── SECURITY_REPORT.md
 ├── backend/
 │   ├── server.js
 │   ├── package.json
@@ -267,6 +269,7 @@ Referencia principal: `backend/.env.example`.
 │   │   ├── seed_demo.sql
 │   │   └── dashboard_queries.sql
 │   └── tests/
+│       ├── api.guards-and-errors.test.mjs
 │       ├── e2e.auth-billing.test.mjs
 │       └── ui/app.critical-flows.spec.mjs
 └── simplify/
@@ -351,3 +354,5 @@ La CI ejecuta:
 Documentacion adicional:
 - `docs/nginx-security.conf`
 - `docs/PRODUCTION_GO_LIVE_CHECKLIST.md`
+- `docs/reports/ARCHITECTURE_ANALYSIS.md`
+- `docs/reports/SECURITY_REPORT.md`
