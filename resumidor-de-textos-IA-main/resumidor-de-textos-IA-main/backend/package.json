@@ -8,7 +8,9 @@
     "dev": "node --watch server.js",
     "check": "node --check server.js",
     "test": "node --test tests/*.test.mjs",
+    "test:ui:setup": "playwright install chromium",
     "test:ui": "playwright test --config=playwright.config.mjs",
+    "test:ui:local": "npm run test:ui:setup && npm run test:ui",
     "test:all": "npm run check && npm test && npm run test:ui"
   },
   "keywords": [],
