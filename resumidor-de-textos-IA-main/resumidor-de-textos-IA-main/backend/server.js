@@ -13,6 +13,7 @@ const DEFAULT_JWT_SECRET = "dev-jwt-secret-change-me";
 const DEFAULT_OTP_PEPPER = "dev-otp-pepper-change-me";
 const NODE_ENV = String(process.env.NODE_ENV || "development").trim().toLowerCase();
 const IS_PRODUCTION = NODE_ENV === "production";
+const IS_DEVELOPMENT = !IS_PRODUCTION;
 
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
@@ -294,7 +295,12 @@ app.post("/api/pay/webhook", express.raw({ type: "application/json" }), async fu
   try {
     event = stripe.webhooks.constructEvent(req.body, signature, CONFIG.stripeWebhookSecret);
   } catch (error) {
-    res.status(400).json({ error: "Webhook inválido.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "Webhook inválido.",
+      fallbackStatusCode: 400,
+      logEvent: "stripe.webhook.invalid",
+      includeDetail: true,
+    });
     return;
   }
 
@@ -322,7 +328,12 @@ app.post("/api/pay/webhook", express.raw({ type: "application/json" }), async fu
 
     res.json({ received: true, deduped: Boolean(processed && processed.deduped) });
   } catch (error) {
-    res.status(500).json({ error: "Error procesando webhook.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "Error procesando webhook.",
+      fallbackStatusCode: 500,
+      logEvent: "stripe.webhook.processing_failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -361,7 +372,12 @@ app.get("/api/health", async function healthHandler(_req, res) {
       now: new Date().toISOString(),
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: String(error && error.message || error) });
+    sendErrorResponse(_req, res, error, {
+      fallbackMessage: "No se pudo completar healthcheck.",
+      fallbackStatusCode: 500,
+      logEvent: "health.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -376,7 +392,12 @@ app.post("/api/auth/session/anonymous", RATE_LIMITERS.authAnonymous, async funct
 
     res.json(buildSessionResponse(user));
   } catch (error) {
-    res.status(500).json({ error: "No se pudo crear sesión anónima.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo crear sesión anónima.",
+      fallbackStatusCode: 500,
+      logEvent: "auth.anonymous.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -426,7 +447,12 @@ app.post("/api/auth/email/request-code", RATE_LIMITERS.authRequestCode, async fu
 
     res.json(payload);
   } catch (error) {
-    res.status(500).json({ error: "No se pudo generar código de verificación.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo generar código de verificación.",
+      fallbackStatusCode: 500,
+      logEvent: "auth.otp.request_failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -465,7 +491,7 @@ app.post("/api/auth/email/verify-code", RATE_LIMITERS.authVerifyCode, async func
       }
 
       const expectedHash = hashOTPCode(email, code);
-      if (expectedHash !== row.code_hash) {
+      if (!safeConstantTimeEqual(expectedHash, row.code_hash)) {
         await client.query("UPDATE email_login_codes SET attempts = attempts + 1 WHERE email = $1", [email]);
         throw createError("Código incorrecto.", 400);
       }
@@ -490,8 +516,12 @@ app.post("/api/auth/email/verify-code", RATE_LIMITERS.authVerifyCode, async func
 
     res.json(buildSessionResponse(verifiedUser));
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo verificar código.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo verificar código.",
+      fallbackStatusCode: 500,
+      logEvent: "auth.otp.verify_failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -552,10 +582,11 @@ app.post("/api/auth/google", RATE_LIMITERS.authGoogle, async function googleAuth
 
     res.json(buildSessionResponse(user));
   } catch (error) {
-    const status = Number(error && error.statusCode) || 401;
-    res.status(status).json({
-      error: "No se pudo validar Google login.",
-      detail: String(error && error.message || error),
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo validar Google login.",
+      fallbackStatusCode: 401,
+      logEvent: "auth.google.failed",
+      includeDetail: true,
     });
   }
 });
@@ -600,8 +631,12 @@ app.post("/api/legal/consent", RATE_LIMITERS.legalWrite, async function recordLe
       version: requestedVersion,
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo registrar consentimiento legal.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo registrar consentimiento legal.",
+      fallbackStatusCode: 500,
+      logEvent: "legal.consent.record_failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -634,8 +669,12 @@ app.get("/api/legal/consent-status", RATE_LIMITERS.legalRead, async function leg
       accepted: result.accepted,
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo consultar consentimiento legal.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo consultar consentimiento legal.",
+      fallbackStatusCode: 500,
+      logEvent: "legal.consent_status.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -746,8 +785,12 @@ app.post("/api/pay/checkout", RATE_LIMITERS.checkout, async function createCheck
       acquisitionChannel: acquisitionChannel,
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: "No se pudo crear Checkout Session.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo crear Checkout Session.",
+      fallbackStatusCode: 500,
+      logEvent: "checkout.create.failed",
+      includeDetail: true,
+    });
   }
 });
 
@@ -835,8 +878,12 @@ app.get("/api/pay/checkout-status", RATE_LIMITERS.checkoutStatus, async function
       balance: finalResult.user ? buildBalancePayload(finalResult.user) : null,
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo consultar checkout status.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo consultar checkout status.",
+      fallbackStatusCode: 500,
+      logEvent: "checkout.status.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -858,8 +905,12 @@ app.get("/api/pay/balance", async function getBalance(req, res) {
       balance: buildBalancePayload(user),
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo obtener balance.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo obtener balance.",
+      fallbackStatusCode: 500,
+      logEvent: "billing.balance.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -901,8 +952,12 @@ app.post("/api/pay/consume", RATE_LIMITERS.payConsume, async function consumeCre
       balance: buildBalancePayload(result),
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo consumir crédito.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo consumir crédito.",
+      fallbackStatusCode: 500,
+      logEvent: "billing.consume.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -928,7 +983,12 @@ app.post("/api/events/track", RATE_LIMITERS.eventsTrack, async function trackEve
     });
     res.status(202).json({ ok: true });
   } catch (error) {
-    res.status(500).json({ error: "No se pudo registrar evento.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo registrar evento.",
+      fallbackStatusCode: 500,
+      logEvent: "events.track.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1062,7 +1122,12 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
     }
 
     const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo completar generación IA.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo completar generación IA.",
+      fallbackStatusCode: status,
+      logEvent: "ai.generate.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1250,7 +1315,12 @@ app.get("/api/admin/metrics", requireAdmin, RATE_LIMITERS.adminRead, async funct
       dailyRevenue: summary.dailyRevenue,
     });
   } catch (error) {
-    res.status(500).json({ error: "No se pudieron obtener métricas.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudieron obtener métricas.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.metrics.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1263,22 +1333,11 @@ app.post("/api/admin/credits/grant", requireAdmin, RATE_LIMITERS.adminWrite, asy
 
   try {
     const user = await withTransaction(async function tx(client) {
-      var target = null;
-      const targetUserId = String(req.body && req.body.userId || "").trim();
-      const targetCustomerId = normalizeCustomerId(req.body && req.body.customerId);
-
-      if (targetUserId) {
-        target = await getUserById(client, targetUserId);
-      }
-      if (!target && targetCustomerId) {
-        target = await getUserByCustomerId(client, targetCustomerId);
-      }
-      if (!target && targetCustomerId) {
-        target = await ensureUserByCustomerId(client, targetCustomerId);
-      }
-      if (!target) {
-        throw createError("No se encontró usuario objetivo para acreditar.", 404);
-      }
+      const target = await resolveAdminTargetUser(
+        client,
+        req.body,
+        "No se encontró usuario objetivo para acreditar."
+      );
 
       await client.query(
         "UPDATE user_credits SET credits = credits + $2::int, total_purchased = total_purchased + $2::int, updated_at = NOW() WHERE user_id = $1",
@@ -1296,8 +1355,12 @@ app.post("/api/admin/credits/grant", requireAdmin, RATE_LIMITERS.adminWrite, asy
       user: publicUser(user),
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudieron acreditar créditos.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudieron acreditar créditos.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.credits_grant.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1310,22 +1373,11 @@ app.post("/api/admin/plan/assign", requireAdmin, RATE_LIMITERS.adminWrite, async
 
   try {
     const user = await withTransaction(async function tx(client) {
-      var target = null;
-      const targetUserId = String(req.body && req.body.userId || "").trim();
-      const targetCustomerId = normalizeCustomerId(req.body && req.body.customerId);
-
-      if (targetUserId) {
-        target = await getUserById(client, targetUserId);
-      }
-      if (!target && targetCustomerId) {
-        target = await getUserByCustomerId(client, targetCustomerId);
-      }
-      if (!target && targetCustomerId) {
-        target = await ensureUserByCustomerId(client, targetCustomerId);
-      }
-      if (!target) {
-        throw createError("No se encontró usuario objetivo para asignar plan.", 404);
-      }
+      const target = await resolveAdminTargetUser(
+        client,
+        req.body,
+        "No se encontró usuario objetivo para asignar plan."
+      );
 
       await client.query(
         "UPDATE user_credits SET plan_tier = $2, subscription_active = CASE WHEN $2 = 'sub' THEN true ELSE false END, updated_at = NOW() WHERE user_id = $1",
@@ -1343,8 +1395,12 @@ app.post("/api/admin/plan/assign", requireAdmin, RATE_LIMITERS.adminWrite, async
       user: publicUser(user),
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || 500;
-    res.status(status).json({ error: String(error && error.message || "No se pudo asignar plan.") });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo asignar plan.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.plan_assign.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1386,7 +1442,12 @@ app.post("/api/admin/marketing/spend", requireAdmin, RATE_LIMITERS.adminWrite, a
       spend: created,
     });
   } catch (error) {
-    res.status(500).json({ error: "No se pudo registrar gasto de marketing.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo registrar gasto de marketing.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.marketing_spend.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1403,7 +1464,12 @@ app.post("/api/admin/recovery/checkout/run", requireAdmin, RATE_LIMITERS.adminWr
     });
     res.json(Object.assign({ ok: true }, result));
   } catch (error) {
-    res.status(500).json({ error: "No se pudo ejecutar recuperación de checkout.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo ejecutar recuperación de checkout.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.recovery_run.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1472,7 +1538,12 @@ app.get("/api/admin/recovery/checkout/stats", requireAdmin, RATE_LIMITERS.adminR
       },
     });
   } catch (error) {
-    res.status(500).json({ error: "No se pudieron cargar estadísticas de recuperación.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudieron cargar estadísticas de recuperación.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.recovery_stats.failed",
+      includeDetail: false,
+    });
   }
 });
 
@@ -1516,34 +1587,45 @@ app.post("/api/admin/reconcile/payments", requireAdmin, RATE_LIMITERS.adminWrite
           results.push({ sessionId: sessionId, status: "pending" });
         }
       } catch (error) {
-        results.push({ sessionId: sessionId, status: "error", detail: String(error && error.message || error) });
+        const detail = String(error && error.message || error).slice(0, 180);
+        logWarn("payments.reconcile.item_failed", {
+          sessionId: sessionId,
+          message: detail,
+        });
+        results.push({
+          sessionId: sessionId,
+          status: "error",
+          detail: IS_DEVELOPMENT ? detail : "Error al reconciliar sesión.",
+        });
       }
     }
+
+    const summary = summarizeReconcileResults(results);
 
     res.json({
       ok: true,
       requested: pendingRows.length,
-      reconciled: results.filter(function filterOk(item) { return item.status === "reconciled"; }).length,
-      pending: results.filter(function filterPending(item) { return item.status === "pending"; }).length,
-      failed: results.filter(function filterFail(item) { return item.status === "error"; }).length,
+      reconciled: summary.reconciled,
+      pending: summary.pending,
+      failed: summary.failed,
       details: results,
     });
   } catch (error) {
-    res.status(500).json({ error: "No se pudo reconciliar pagos.", detail: String(error && error.message || error) });
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo reconciliar pagos.",
+      fallbackStatusCode: 500,
+      logEvent: "admin.reconcile.failed",
+      includeDetail: false,
+    });
   }
 });
 
 app.use(function errorHandler(err, req, res, _next) {
-  logError("request.error", {
-    requestId: req && req.requestId ? req.requestId : null,
-    method: req && req.method ? req.method : null,
-    path: req && req.originalUrl ? req.originalUrl : null,
-    message: String(err && err.message || err),
-  });
-  res.status(500).json({
-    error: "Error interno.",
-    detail: String(err && err.message || err),
-    requestId: req && req.requestId ? req.requestId : null,
+  sendErrorResponse(req, res, err, {
+    fallbackMessage: "Error interno.",
+    fallbackStatusCode: 500,
+    logEvent: "request.unhandled_error",
+    includeDetail: false,
   });
 });
 
@@ -1637,7 +1719,11 @@ function createMailer() {
 
 async function deliverOTPEmail(email, code, expiresAt) {
   if (!mailer) {
-    console.info("[dev-otp] email=%s code=%s expires=%s", email, code, expiresAt.toISOString());
+    logInfo("dev.otp.generated", {
+      email: email,
+      code: code,
+      expiresAt: expiresAt.toISOString(),
+    });
     return "dev-log";
   }
 
@@ -1657,7 +1743,10 @@ async function deliverOTPEmail(email, code, expiresAt) {
 
 async function deliverEmail(to, subject, text, html) {
   if (!mailer) {
-    console.info("[dev-email] to=%s subject=%s", to, subject);
+    logInfo("dev.email.generated", {
+      to: to,
+      subject: subject,
+    });
     return "dev-log";
   }
   await mailer.sendMail({
@@ -1722,6 +1811,20 @@ function getRecoveryScheduleForAttempt(createdAtInput, attemptsCompleted) {
     nextAttemptAt: nextAttemptAt,
     totalSteps: sequence.length,
   };
+}
+
+function buildRecoveryEventContext(baseContext, extraPayload) {
+  var base = baseContext && typeof baseContext === "object" ? baseContext : {};
+  var extra = extraPayload && typeof extraPayload === "object" ? extraPayload : {};
+  return Object.assign({
+    sessionId: base.sessionId || "",
+    stepNumber: Number(base.stepNumber || 0),
+    totalSteps: Number(base.totalSteps || 0),
+    variant: String(base.variant || "A"),
+    segmentPlan: String(base.planTier || "free"),
+    segmentChannel: String(base.segmentChannel || "direct"),
+    trigger: String(base.trigger || "manual"),
+  }, extra);
 }
 
 function getRecoveryActivitySince(candidate) {
@@ -2112,6 +2215,15 @@ async function runCheckoutRecoverySweep(options) {
       const planTier = resolveRecoveryPlanTier(candidate);
       const segmentChannel = classifyAcquisitionChannel(candidate.acquisition_channel);
       const variant = chooseRecoveryVariant(candidate.session_id, schedule.stepNumber);
+      const eventContextBase = {
+        sessionId: candidate.session_id,
+        stepNumber: schedule.stepNumber,
+        totalSteps: schedule.totalSteps,
+        variant: variant,
+        planTier: planTier,
+        segmentChannel: segmentChannel,
+        trigger: opts.trigger,
+      };
       let stripeSession = null;
       let checkoutURL = buildCheckoutRecoveryURL(candidate.session_id, null);
 
@@ -2140,16 +2252,13 @@ async function runCheckoutRecoverySweep(options) {
             "UPDATE payment_sessions SET recovery_attempts = $2, recovery_last_error = $3, recovery_next_attempt_at = $4, recovery_last_variant = $5, recovery_last_step = $6, updated_at = NOW() WHERE session_id = $1",
             [candidate.session_id, totalSteps, "email-missing", nextAttemptIso, variant, schedule.stepNumber]
           );
-          await recordEvent(client, "checkout_recovery_skipped", candidate.user_id || null, candidate.customer_id || null, {
-            sessionId: candidate.session_id,
-            reason: "email-missing",
-            stepNumber: schedule.stepNumber,
-            totalSteps: schedule.totalSteps,
-            variant: variant,
-            segmentPlan: planTier,
-            segmentChannel: segmentChannel,
-            trigger: opts.trigger,
-          });
+          await recordEvent(
+            client,
+            "checkout_recovery_skipped",
+            candidate.user_id || null,
+            candidate.customer_id || null,
+            buildRecoveryEventContext(eventContextBase, { reason: "email-missing" })
+          );
         });
         continue;
       }
@@ -2164,19 +2273,18 @@ async function runCheckoutRecoverySweep(options) {
                 "UPDATE payment_sessions SET recovery_attempts = $2, recovery_last_error = $3, recovery_last_variant = $4, recovery_last_step = $5, recovery_next_attempt_at = NULL, updated_at = NOW() WHERE session_id = $1",
                 [candidate.session_id, totalSteps, "stopped-user-active", variant, schedule.stepNumber]
               );
-              await recordEvent(client, "checkout_recovery_suppressed_active", candidate.user_id || null, candidate.customer_id || null, {
-                sessionId: candidate.session_id,
-                stepNumber: schedule.stepNumber,
-                totalSteps: schedule.totalSteps,
-                variant: variant,
-                segmentPlan: planTier,
-                segmentChannel: segmentChannel,
-                activityEvent: String(recentActivity.event_name || "unknown"),
-                activityAt: recentActivity.created_at && typeof recentActivity.created_at.toISOString === "function"
-                  ? recentActivity.created_at.toISOString()
-                  : String(recentActivity.created_at || ""),
-                trigger: opts.trigger,
-              });
+              await recordEvent(
+                client,
+                "checkout_recovery_suppressed_active",
+                candidate.user_id || null,
+                candidate.customer_id || null,
+                buildRecoveryEventContext(eventContextBase, {
+                  activityEvent: String(recentActivity.event_name || "unknown"),
+                  activityAt: recentActivity.created_at && typeof recentActivity.created_at.toISOString === "function"
+                    ? recentActivity.created_at.toISOString()
+                    : String(recentActivity.created_at || ""),
+                })
+              );
             });
           }
           continue;
@@ -2189,13 +2297,7 @@ async function runCheckoutRecoverySweep(options) {
       }
 
       try {
-        const recoveryContext = {
-          stepNumber: schedule.stepNumber,
-          totalSteps: schedule.totalSteps,
-          variant: variant,
-          planTier: planTier,
-          segmentChannel: segmentChannel,
-        };
+        const recoveryContext = eventContextBase;
         const emailResult = await sendCheckoutRecoveryEmail(candidate, checkoutURL, recoveryContext);
         const nextAttemptIso = schedule.nextAttemptAt ? schedule.nextAttemptAt.toISOString() : null;
         emailed += 1;
@@ -2204,19 +2306,18 @@ async function runCheckoutRecoverySweep(options) {
             "UPDATE payment_sessions SET status = 'pending', recovery_email_sent_at = NOW(), recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = NULL, recovery_last_variant = $2, recovery_last_step = $3, recovery_next_attempt_at = $4, updated_at = NOW() WHERE session_id = $1",
             [candidate.session_id, variant, schedule.stepNumber, nextAttemptIso]
           );
-          await recordEvent(client, "checkout_recovery_email_sent", candidate.user_id || null, candidate.customer_id || null, {
-            sessionId: candidate.session_id,
-            planId: candidate.plan_id || "",
-            planTier: planTier,
-            segmentPlan: planTier,
-            segmentChannel: segmentChannel,
-            stepNumber: schedule.stepNumber,
-            totalSteps: schedule.totalSteps,
-            variant: variant,
-            subject: emailResult.subject,
-            delivery: emailResult.delivery,
-            trigger: opts.trigger,
-          });
+          await recordEvent(
+            client,
+            "checkout_recovery_email_sent",
+            candidate.user_id || null,
+            candidate.customer_id || null,
+            buildRecoveryEventContext(eventContextBase, {
+              planId: candidate.plan_id || "",
+              planTier: planTier,
+              subject: emailResult.subject,
+              delivery: emailResult.delivery,
+            })
+          );
         });
       } catch (error) {
         failed += 1;
@@ -2226,17 +2327,16 @@ async function runCheckoutRecoverySweep(options) {
             "UPDATE payment_sessions SET recovery_attempts = COALESCE(recovery_attempts,0) + 1, recovery_last_error = $2, recovery_last_variant = $3, recovery_last_step = $4, recovery_next_attempt_at = $5, updated_at = NOW() WHERE session_id = $1",
             [candidate.session_id, String(error && error.message || error).slice(0, 180), variant, schedule.stepNumber, nextAttemptIso]
           );
-          await recordEvent(client, "checkout_recovery_email_failed", candidate.user_id || null, candidate.customer_id || null, {
-            sessionId: candidate.session_id,
-            reason: String(error && error.message || error).slice(0, 180),
-            stepNumber: schedule.stepNumber,
-            totalSteps: schedule.totalSteps,
-            variant: variant,
-            planTier: planTier,
-            segmentPlan: planTier,
-            segmentChannel: segmentChannel,
-            trigger: opts.trigger,
-          });
+          await recordEvent(
+            client,
+            "checkout_recovery_email_failed",
+            candidate.user_id || null,
+            candidate.customer_id || null,
+            buildRecoveryEventContext(eventContextBase, {
+              reason: String(error && error.message || error).slice(0, 180),
+              planTier: planTier,
+            })
+          );
         });
       }
     }
@@ -2538,6 +2638,26 @@ async function resolveUserFromRequest(client, req, providedCustomerId, options) 
   }
 
   return ensureUserByCustomerId(client, incomingCustomerId);
+}
+
+async function resolveAdminTargetUser(client, payload, notFoundMessage) {
+  var target = null;
+  const targetUserId = String(payload && payload.userId || "").trim();
+  const targetCustomerId = normalizeCustomerId(payload && payload.customerId);
+
+  if (targetUserId) {
+    target = await getUserById(client, targetUserId);
+  }
+  if (!target && targetCustomerId) {
+    target = await getUserByCustomerId(client, targetCustomerId);
+  }
+  if (!target && targetCustomerId) {
+    target = await ensureUserByCustomerId(client, targetCustomerId);
+  }
+  if (!target) {
+    throw createError(notFoundMessage, 404);
+  }
+  return target;
 }
 
 async function mergeUsers(client, sourceUserId, targetUserId) {
@@ -2862,8 +2982,8 @@ function requireAuth(req, res, next) {
 }
 
 function requireAdmin(req, res, next) {
-  const headerKey = String(req.headers["x-admin-key"] || "").trim();
-  const headerMatch = Boolean(CONFIG.adminAPIKey) && headerKey && headerKey === CONFIG.adminAPIKey;
+  const headerKey = String(req.headers["x-admin-key"] || "").trim().slice(0, 256);
+  const headerMatch = Boolean(CONFIG.adminAPIKey) && headerKey && safeConstantTimeEqual(headerKey, CONFIG.adminAPIKey);
   const roleMatch = req.authUser && req.authUser.role === "admin";
   if (!headerMatch && !roleMatch) {
     res.status(403).json({ error: "Acceso admin requerido." });
@@ -3114,6 +3234,83 @@ function createError(message, statusCode) {
   return error;
 }
 
+function normalizeError(error, fallbackMessage, fallbackStatusCode) {
+  var fallback = String(fallbackMessage || "Error interno.");
+  var statusFallback = Number.isFinite(Number(fallbackStatusCode)) ? Number(fallbackStatusCode) : 500;
+  var statusCode = Number(error && error.statusCode);
+  if (!Number.isFinite(statusCode) || statusCode < 400 || statusCode > 599) {
+    statusCode = statusFallback;
+  }
+  var detail = String(error && error.message || error || fallback).trim() || fallback;
+  var message = statusCode >= 500 ? fallback : detail;
+  return {
+    statusCode: statusCode,
+    message: message,
+    detail: detail,
+  };
+}
+
+function shouldExposeErrorDetail(statusCode) {
+  return IS_DEVELOPMENT || statusCode < 500;
+}
+
+function sendErrorResponse(req, res, error, options) {
+  var opts = Object.assign({
+    fallbackMessage: "Error interno.",
+    fallbackStatusCode: 500,
+    logEvent: "request.failed",
+    includeDetail: false,
+  }, options || {});
+  var normalized = normalizeError(error, opts.fallbackMessage, opts.fallbackStatusCode);
+  var requestId = req && req.requestId ? req.requestId : null;
+  var payload = {
+    error: normalized.message,
+    requestId: requestId,
+  };
+  if (opts.includeDetail && shouldExposeErrorDetail(normalized.statusCode)) {
+    payload.detail = normalized.detail;
+  }
+
+  var logRecord = {
+    requestId: requestId,
+    method: req && req.method ? req.method : null,
+    path: req && req.originalUrl ? req.originalUrl : null,
+    statusCode: normalized.statusCode,
+    message: normalized.detail,
+  };
+  if (normalized.statusCode >= 500) {
+    logError(opts.logEvent, logRecord);
+  } else {
+    logWarn(opts.logEvent, logRecord);
+  }
+
+  res.status(normalized.statusCode).json(payload);
+}
+
+function safeConstantTimeEqual(leftValue, rightValue) {
+  var left = String(leftValue || "");
+  var right = String(rightValue || "");
+  var leftBuffer = Buffer.from(left);
+  var rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function summarizeReconcileResults(results) {
+  var list = Array.isArray(results) ? results : [];
+  return {
+    reconciled: list.filter(function filterOk(item) { return item.status === "reconciled"; }).length,
+    pending: list.filter(function filterPending(item) { return item.status === "pending"; }).length,
+    failed: list.filter(function filterFail(item) { return item.status === "error"; }).length,
+  };
+}
+
 function requestContextMiddleware(req, res, next) {
   var incoming = String(req && req.headers && req.headers["x-request-id"] || "")
     .trim()
@@ -3165,6 +3362,10 @@ function isHttpsRequest(req) {
 
 function logInfo(event, payload) {
   logStructured("info", event, payload);
+}
+
+function logWarn(event, payload) {
+  logStructured("warn", event, payload);
 }
 
 function logError(event, payload) {
@@ -3328,9 +3529,18 @@ function extractOutput(payload) {
 
 if (require.main === module) {
   startServer().then(function onStarted(details) {
-    console.log("[simplify-backend] listening on port " + details.port + " (" + details.provider + ")");
+    logInfo("server.started", {
+      port: details.port,
+      host: details.host,
+      provider: details.provider,
+      nodeEnv: NODE_ENV,
+    });
   }).catch(function fatal(error) {
-    console.error("[fatal] startup error", error);
+    logError("server.startup_failed", {
+      message: String(error && error.message || error),
+      stack: error && error.stack ? String(error.stack).split("\n").slice(0, 8).join("\n") : null,
+      nodeEnv: NODE_ENV,
+    });
     process.exit(1);
   });
 }
