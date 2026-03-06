@@ -207,6 +207,12 @@ La UI crítica (transformación, auth OTP, admin y checkout mock) está cubierta
 
 ```bash
 cd backend
+npm run test:ui:local
+```
+
+Si ya tienes Chromium de Playwright instalado en tu entorno, puedes ejecutar directamente:
+
+```bash
 npm run test:ui
 ```
 

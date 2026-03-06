@@ -9,6 +9,10 @@ const { Pool } = require("pg");
 const Stripe = require("stripe");
 
 const app = express();
+const DEFAULT_JWT_SECRET = "dev-jwt-secret-change-me";
+const DEFAULT_OTP_PEPPER = "dev-otp-pepper-change-me";
+const NODE_ENV = String(process.env.NODE_ENV || "development").trim().toLowerCase();
+const IS_PRODUCTION = NODE_ENV === "production";
 
 const CONFIG = {
   port: Number(process.env.PORT || 8787),
@@ -33,13 +37,13 @@ const CONFIG = {
   priceOneCents: readNumber("PRICE_ONE_CENTS", 100),
   pricePackCents: readNumber("PRICE_PACK_CENTS", 500),
   priceSubCents: readNumber("PRICE_SUB_CENTS", 800),
-  jwtSecret: String(process.env.JWT_SECRET || "dev-jwt-secret-change-me").trim(),
+  jwtSecret: String(process.env.JWT_SECRET || DEFAULT_JWT_SECRET).trim(),
   jwtExpiresIn: String(process.env.JWT_EXPIRES_IN || "30d").trim(),
   adminAPIKey: String(process.env.ADMIN_API_KEY || "").trim(),
-  otpPepper: String(process.env.OTP_PEPPER || "dev-otp-pepper-change-me").trim(),
+  otpPepper: String(process.env.OTP_PEPPER || DEFAULT_OTP_PEPPER).trim(),
   otpTTLMinutes: readNumber("OTP_TTL_MINUTES", 10),
   otpMaxAttempts: readNumber("OTP_MAX_ATTEMPTS", 5),
-  showDevOTP: String(process.env.SHOW_DEV_OTP || "").trim() === "1" || process.env.NODE_ENV !== "production",
+  showDevOTP: String(process.env.SHOW_DEV_OTP || "").trim() === "1" || !IS_PRODUCTION,
   googleClientId: String(process.env.GOOGLE_CLIENT_ID || "").trim(),
   smtpHost: String(process.env.SMTP_HOST || "").trim(),
   smtpPort: readNumber("SMTP_PORT", 587),
@@ -114,6 +118,29 @@ const PLAN_LIMITS = {
 };
 
 const ALLOW_ANY_ORIGIN = CONFIG.frontendOrigins.includes("*");
+
+function assertProductionSafety() {
+  if (!IS_PRODUCTION) {
+    return;
+  }
+  const issues = [];
+  if (CONFIG.jwtSecret === DEFAULT_JWT_SECRET) {
+    issues.push("JWT_SECRET debe ser un secreto real en producción (no uses el valor por defecto).");
+  }
+  if (CONFIG.otpPepper === DEFAULT_OTP_PEPPER) {
+    issues.push("OTP_PEPPER debe ser un secreto real en producción (no uses el valor por defecto).");
+  }
+  if (CONFIG.showDevOTP) {
+    issues.push("SHOW_DEV_OTP debe estar desactivado en producción.");
+  }
+  if (ALLOW_ANY_ORIGIN) {
+    issues.push("FRONTEND_ORIGINS no puede ser '*' en producción.");
+  }
+  if (issues.length > 0) {
+    throw new Error("Configuración insegura detectada para producción:\n- " + issues.join("\n- "));
+  }
+}
+
 const RATE_LIMITERS = {
   globalApi: createRateLimiter({
     name: "global-api",
@@ -1544,6 +1571,7 @@ async function startServer(options) {
   if (poolClosed) {
     throw new Error("Pool ya fue cerrado; reinicia el proceso para volver a arrancar.");
   }
+  assertProductionSafety();
 
   if (!hasMigrated) {
     await runMigrations();
