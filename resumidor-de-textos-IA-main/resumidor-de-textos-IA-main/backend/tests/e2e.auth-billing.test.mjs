@@ -244,6 +244,84 @@ test("AI generation consumes free quota server-side", async () => {
   assert.equal(Number(balanceAfter.balance.freeUsed), beforeFreeUsed + 1);
 });
 
+test("AI history supports list, cursor and secure delete", async () => {
+  const generated = await requestJSON(
+    "POST",
+    "/api/ai/generate",
+    {
+      input: "Texto para validar persistencia en historial.",
+      systemPrompt: "Eres un editor de pruebas.",
+      userPrompt: "Genera una salida de test para historial.",
+      style: "neutral",
+      metadata: { customerId },
+    },
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.ok(generated.output.includes("Salida IA de prueba"));
+
+  const historyPage = await requestJSON(
+    "GET",
+    "/api/ai/history?limit=1",
+    undefined,
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(historyPage.ok, true);
+  assert.equal(Array.isArray(historyPage.items), true);
+  assert.equal(historyPage.items.length, 1);
+
+  const firstItem = historyPage.items[0];
+  assert.ok(firstItem.id);
+  assert.ok(String(firstItem.output || "").includes("Salida IA de prueba"));
+  assert.ok(String(firstItem.inputPreview || "").length > 0);
+  assert.ok(firstItem.createdAt);
+
+  if (historyPage.nextCursor) {
+    const nextPage = await requestJSON(
+      "GET",
+      "/api/ai/history?limit=1&cursor=" + encodeURIComponent(historyPage.nextCursor),
+      undefined,
+      { Authorization: "Bearer " + authToken }
+    );
+    assert.equal(nextPage.ok, true);
+    if (nextPage.items.length > 0) {
+      assert.notEqual(String(nextPage.items[0].id), String(firstItem.id));
+    }
+  }
+
+  const otherUser = await requestJSON("POST", "/api/auth/session/anonymous", {
+    customerId: "cust_history_other_user",
+  });
+  const forbiddenDelete = await requestRaw(
+    "DELETE",
+    "/api/ai/history/" + encodeURIComponent(firstItem.id),
+    undefined,
+    { Authorization: "Bearer " + otherUser.token }
+  );
+  assert.equal(forbiddenDelete.status, 404);
+  assert.equal(forbiddenDelete.ok, false);
+
+  const deleted = await requestJSON(
+    "DELETE",
+    "/api/ai/history/" + encodeURIComponent(firstItem.id),
+    undefined,
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(deleted.ok, true);
+  assert.equal(String(deleted.deletedId), String(firstItem.id));
+
+  const historyAfterDelete = await requestJSON(
+    "GET",
+    "/api/ai/history?limit=20",
+    undefined,
+    { Authorization: "Bearer " + authToken }
+  );
+  assert.equal(historyAfterDelete.ok, true);
+  assert.equal(
+    historyAfterDelete.items.some((item) => String(item.id) === String(firstItem.id)),
+    false
+  );
+});
+
 test("admin can grant credits and user can consume them", async () => {
   const granted = await requestJSON(
     "POST",

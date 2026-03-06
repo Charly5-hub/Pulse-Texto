@@ -108,3 +108,33 @@ test("health endpoint returns requestId on handled internal error", async () => 
     backend.pool.query = originalQuery;
   }
 });
+
+test("ai history endpoints require authentication", async () => {
+  const listResponse = await requestRaw("GET", "/api/ai/history?limit=10");
+  assert.equal(listResponse.status, 401);
+  assert.equal(listResponse.ok, false);
+  assert.equal(listResponse.body.error, "Autenticación requerida.");
+
+  const deleteResponse = await requestRaw("DELETE", "/api/ai/history/1");
+  assert.equal(deleteResponse.status, 401);
+  assert.equal(deleteResponse.ok, false);
+  assert.equal(deleteResponse.body.error, "Autenticación requerida.");
+});
+
+test("ai history rejects malformed cursor", async () => {
+  const session = await requestRaw("POST", "/api/auth/session/anonymous", {
+    customerId: "cust_history_cursor_validation",
+  });
+  assert.equal(session.status, 200);
+  assert.ok(session.body && session.body.token);
+
+  const response = await requestRaw(
+    "GET",
+    "/api/ai/history?cursor=cursor_invalido",
+    undefined,
+    { Authorization: "Bearer " + session.body.token }
+  );
+  assert.equal(response.status, 400);
+  assert.equal(response.ok, false);
+  assert.equal(response.body.error, "cursor inválido.");
+});

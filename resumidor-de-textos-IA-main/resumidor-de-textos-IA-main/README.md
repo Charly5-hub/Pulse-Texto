@@ -316,6 +316,8 @@ Referencia principal: `backend/.env.example`.
 
 ### IA y eventos
 - `POST /api/ai/generate`
+- `GET /api/ai/history` (requiere autenticación)
+- `DELETE /api/ai/history/:id` (requiere autenticación)
 - `POST /api/events/track`
 
 ### Admin

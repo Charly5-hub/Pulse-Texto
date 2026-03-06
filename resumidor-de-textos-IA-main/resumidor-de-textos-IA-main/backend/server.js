@@ -117,6 +117,10 @@ const PLAN_LIMITS = {
   pack: { maxInputChars: CONFIG.maxInputPack },
   sub: { maxInputChars: CONFIG.maxInputSub },
 };
+const AI_HISTORY_DEFAULT_LIMIT = 20;
+const AI_HISTORY_MAX_LIMIT = 100;
+const AI_HISTORY_INPUT_PREVIEW_MAX = 500;
+const AI_HISTORY_OUTPUT_MAX = 16000;
 
 const ALLOW_ANY_ORIGIN = CONFIG.frontendOrigins.includes("*");
 
@@ -224,6 +228,22 @@ const RATE_LIMITERS = {
       var customerFromMeta = normalizeCustomerId(req.body && req.body.metadata && req.body.metadata.customerId);
       var stable = customerFromMeta || customerFromBody;
       return getClientKey(req) + ":" + stable;
+    },
+  }),
+  aiHistoryRead: createRateLimiter({
+    name: "ai-history-read",
+    windowMs: 60 * 1000,
+    max: 120,
+    keyFn: function key(req) {
+      return getClientKey(req);
+    },
+  }),
+  aiHistoryWrite: createRateLimiter({
+    name: "ai-history-write",
+    windowMs: 60 * 1000,
+    max: 60,
+    keyFn: function key(req) {
+      return getClientKey(req);
     },
   }),
   adminRead: createRateLimiter({
@@ -1096,6 +1116,24 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
     if (!output) {
       throw createError("Proveedor IA no devolvió contenido.", 502);
     }
+    try {
+      await withTransaction(async function tx(client) {
+        await saveAIGenerationHistory(client, {
+          userId: actor.id,
+          customerId: actor.customer_id,
+          input: userPrompt || input,
+          output: output,
+          style: narrativeStyle,
+          model: (json && json.model) || requestedModel,
+        });
+      });
+    } catch (historyError) {
+      logWarn("ai.history.persist_failed", {
+        requestId: req && req.requestId ? req.requestId : null,
+        userId: actor && actor.id ? actor.id : null,
+        message: String(historyError && historyError.message || historyError).slice(0, 180),
+      });
+    }
 
     res.json({
       output: output,
@@ -1126,6 +1164,63 @@ app.post("/api/ai/generate", RATE_LIMITERS.aiGenerate, async function generateWi
       fallbackMessage: "No se pudo completar generación IA.",
       fallbackStatusCode: status,
       logEvent: "ai.generate.failed",
+      includeDetail: false,
+    });
+  }
+});
+
+app.get("/api/ai/history", requireAuth, RATE_LIMITERS.aiHistoryRead, async function getAIHistory(req, res) {
+  const limit = clampAIHistoryLimit(req.query && req.query.limit);
+  const rawCursor = req.query && req.query.cursor;
+  const hasCursor = rawCursor !== undefined && rawCursor !== null && String(rawCursor).trim() !== "";
+  const cursor = normalizeAIHistoryCursor(rawCursor);
+  if (hasCursor && !cursor) {
+    res.status(400).json({ error: "cursor inválido." });
+    return;
+  }
+  try {
+    const result = await withTransaction(async function tx(client) {
+      return listAIGenerationHistory(client, req.authUser.id, limit, cursor);
+    });
+    res.json({
+      ok: true,
+      items: result.items,
+      nextCursor: result.nextCursor,
+      limit: limit,
+    });
+  } catch (error) {
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo cargar historial IA.",
+      fallbackStatusCode: 500,
+      logEvent: "ai.history.list.failed",
+      includeDetail: false,
+    });
+  }
+});
+
+app.delete("/api/ai/history/:id", requireAuth, RATE_LIMITERS.aiHistoryWrite, async function deleteAIHistory(req, res) {
+  const historyId = normalizeAIHistoryCursor(req.params && req.params.id);
+  if (!historyId) {
+    res.status(400).json({ error: "id inválido." });
+    return;
+  }
+  try {
+    const deleted = await withTransaction(async function tx(client) {
+      return deleteAIGenerationHistory(client, req.authUser.id, historyId);
+    });
+    if (!deleted) {
+      res.status(404).json({ error: "Registro no encontrado." });
+      return;
+    }
+    res.json({
+      ok: true,
+      deletedId: String(historyId),
+    });
+  } catch (error) {
+    sendErrorResponse(req, res, error, {
+      fallbackMessage: "No se pudo eliminar registro de historial IA.",
+      fallbackStatusCode: 500,
+      logEvent: "ai.history.delete.failed",
       includeDetail: false,
     });
   }
@@ -2505,6 +2600,9 @@ async function runMigrations() {
     "CREATE TABLE IF NOT EXISTS app_events (id BIGSERIAL PRIMARY KEY, event_name TEXT NOT NULL, user_id TEXT REFERENCES app_users(id) ON DELETE SET NULL, customer_id TEXT, payload JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE INDEX IF NOT EXISTS idx_app_events_created_at ON app_events(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_app_events_event_name ON app_events(event_name)",
+    "CREATE TABLE IF NOT EXISTS ai_generations (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE, customer_id TEXT NOT NULL, input_preview TEXT NOT NULL, output_text TEXT NOT NULL, style TEXT NOT NULL DEFAULT 'neutral', model TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE INDEX IF NOT EXISTS idx_ai_generations_user_created ON ai_generations(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_generations_customer_created ON ai_generations(customer_id, created_at DESC)",
     "CREATE TABLE IF NOT EXISTS legal_consents (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE, customer_id TEXT NOT NULL, version TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'web', accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), user_agent TEXT, ip_hash TEXT)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_consents_user_version ON legal_consents(user_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_legal_consents_customer_version ON legal_consents(customer_id, version)",
@@ -2731,6 +2829,74 @@ async function recordEvent(client, eventName, userId, customerId, payload) {
     "INSERT INTO app_events (event_name, user_id, customer_id, payload, created_at) VALUES ($1,$2,$3,$4::jsonb,NOW())",
     [eventName, userId || null, customerId || null, JSON.stringify(payload || {})]
   );
+}
+
+async function saveAIGenerationHistory(client, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const userId = String(opts.userId || "").trim();
+  const customerId = normalizeCustomerId(opts.customerId);
+  if (!userId || !customerId) {
+    return;
+  }
+  const inputPreview = truncateForStorage(String(opts.input || "").trim(), AI_HISTORY_INPUT_PREVIEW_MAX);
+  const outputText = truncateForStorage(String(opts.output || "").trim(), AI_HISTORY_OUTPUT_MAX);
+  const style = normalizeNarrativeStyle(opts.style);
+  const model = truncateForStorage(String(opts.model || "").trim(), 120) || null;
+  if (!inputPreview || !outputText) {
+    return;
+  }
+  await client.query(
+    "INSERT INTO ai_generations (user_id, customer_id, input_preview, output_text, style, model, created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW())",
+    [userId, customerId, inputPreview, outputText, style, model]
+  );
+}
+
+async function listAIGenerationHistory(client, userId, limit, cursor) {
+  const parsedLimit = clampAIHistoryLimit(limit);
+  const cursorId = normalizeAIHistoryCursor(cursor);
+  const params = [String(userId || "").trim()];
+  const clauses = ["user_id = $1"];
+  if (cursorId) {
+    params.push(cursorId);
+    clauses.push("id < $" + params.length);
+  }
+  params.push(parsedLimit + 1);
+  const result = await client.query(
+    [
+      "SELECT id, input_preview, output_text, style, model, created_at",
+      "FROM ai_generations",
+      "WHERE " + clauses.join(" AND "),
+      "ORDER BY id DESC",
+      "LIMIT $" + params.length,
+    ].join(" "),
+    params
+  );
+  const hasMore = result.rows.length > parsedLimit;
+  const items = result.rows.slice(0, parsedLimit).map(function mapHistoryRow(row) {
+    return {
+      id: String(row.id),
+      inputPreview: row.input_preview || "",
+      output: row.output_text || "",
+      style: normalizeNarrativeStyle(row.style),
+      model: row.model || null,
+      createdAt: row.created_at && typeof row.created_at.toISOString === "function"
+        ? row.created_at.toISOString()
+        : String(row.created_at || ""),
+    };
+  });
+  const tail = items.length > 0 ? items[items.length - 1] : null;
+  return {
+    items: items,
+    nextCursor: hasMore && tail ? String(tail.id) : null,
+  };
+}
+
+async function deleteAIGenerationHistory(client, userId, historyId) {
+  const result = await client.query(
+    "DELETE FROM ai_generations WHERE id = $1 AND user_id = $2 RETURNING id",
+    [historyId, String(userId || "").trim()]
+  );
+  return result.rowCount > 0;
 }
 
 async function consumeGenerationQuota(client, userId) {
@@ -3431,6 +3597,34 @@ function toPositiveInt(value, fallback) {
     return fallback;
   }
   return Math.max(1, Math.floor(parsed));
+}
+
+function clampAIHistoryLimit(value) {
+  return Math.max(1, Math.min(AI_HISTORY_MAX_LIMIT, toPositiveInt(value, AI_HISTORY_DEFAULT_LIMIT)));
+}
+
+function normalizeAIHistoryCursor(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const integer = Math.floor(parsed);
+  if (integer <= 0) {
+    return null;
+  }
+  return integer;
+}
+
+function truncateForStorage(value, maxLength) {
+  const raw = String(value || "");
+  const max = Math.max(1, Number(maxLength) || 1);
+  if (raw.length <= max) {
+    return raw;
+  }
+  return raw.slice(0, max);
 }
 
 function getClientKey(req) {
